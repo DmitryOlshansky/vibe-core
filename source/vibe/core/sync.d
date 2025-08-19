@@ -19,7 +19,6 @@ module vibe.core.sync;
 
 import vibe.core.log;
 import vibe.core.task;
-import vibe.core.internal.threadlocalwaiter;
 
 import core.atomic;
 import core.sync.mutex;
@@ -28,6 +27,7 @@ import eventcore.core;
 import std.exception;
 import std.stdio;
 import std.traits : ReturnType;
+import photon;
 
 
 /** Creates a new signal that can be shared between fibers.
@@ -1147,118 +1147,7 @@ unittest {
 
 	Note: the ownership can be shared between multiple fibers of the same thread.
 */
-struct LocalManualEvent {
-	import core.thread : Thread;
-	import vibe.internal.async : Waitable, asyncAwait, asyncAwaitUninterruptible, asyncAwaitAny;
-
-	@safe:
-
-	private {
-		ThreadLocalWaiter!false m_waiter;
-	}
-
-	private void initialize()
-	nothrow {
-		m_waiter = allocPlainThreadLocalWaiter();
-	}
-
-	this(this)
-	nothrow {
-		if (m_waiter)
-			return m_waiter.addRef();
-	}
-
-	~this()
-	nothrow {
-		if (m_waiter) m_waiter.releaseRef();
-	}
-
-	bool opCast (T : bool) () const nothrow { return m_waiter !is null; }
-
-	/// A counter that is increased with every emit() call
-	int emitCount() const nothrow { return m_waiter.emitCount; }
-
-	/// Emits the signal, waking up all owners of the signal.
-	int emit()
-	nothrow {
-		assert(m_waiter !is null, "LocalManualEvent is not initialized - use createManualEvent()");
-		logTrace("unshared emit");
-		auto ec = m_waiter.emitCount;
-		m_waiter.emit();
-		return ec;
-	}
-
-	/// Emits the signal, waking up a single owners of the signal.
-	int emitSingle()
-	nothrow {
-		assert(m_waiter !is null, "LocalManualEvent is not initialized - use createManualEvent()");
-		logTrace("unshared single emit");
-		auto ec = m_waiter.emitCount;
-		m_waiter.emitSingle();
-		return ec;
-	}
-
-	/** Acquires ownership and waits until the signal is emitted.
-
-		Note that in order not to miss any emits it is necessary to use the
-		overload taking an integer.
-
-		Throws:
-			May throw an $(D InterruptException) if the task gets interrupted
-			using $(D Task.interrupt()).
-	*/
-	int wait() { return wait(this.emitCount); }
-
-	/** Acquires ownership and waits until the signal is emitted and the emit
-		count is larger than a given one.
-
-		Throws:
-			May throw an $(D InterruptException) if the task gets interrupted
-			using $(D Task.interrupt()).
-	*/
-	int wait(int emit_count) { return doWait!true(Duration.max, emit_count); }
-	/// ditto
-	int wait(Duration timeout, int emit_count) { return doWait!true(timeout, emit_count); }
-
-	/** Same as $(D wait), but defers throwing any $(D InterruptException).
-
-		This method is annotated $(D nothrow) at the expense that it cannot be
-		interrupted.
-	*/
-	int waitUninterruptible() nothrow { return waitUninterruptible(this.emitCount); }
-	/// ditto
-	int waitUninterruptible(int emit_count) nothrow { return doWait!false(Duration.max, emit_count); }
-	/// ditto
-	int waitUninterruptible(Duration timeout, int emit_count) nothrow { return doWait!false(timeout, emit_count); }
-
-	bool opEquals(ref const LocalManualEvent other)
-	const nothrow {
-		return this.m_waiter is other.m_waiter;
-	}
-
-	private int doWait(bool interruptible)(Duration timeout, int emit_count)
-	{
-		import core.time : MonoTime;
-
-		assert(m_waiter !is null, "LocalManualEvent is not initialized - use createManualEvent()");
-
-		MonoTime target_timeout, now;
-		if (timeout != Duration.max) {
-			try now = MonoTime.currTime();
-			catch (Exception e) { assert(false, e.msg); }
-			target_timeout = now + timeout;
-		}
-
-		while (m_waiter.emitCount - emit_count <= 0) {
-			m_waiter.wait!interruptible(timeout != Duration.max ? target_timeout - now : Duration.max);
-			try now = MonoTime.currTime();
-			catch (Exception e) { assert(false, e.msg); }
-			if (now >= target_timeout) break;
-		}
-
-		return m_waiter.emitCount;
-	}
-}
+alias LocalManualEvent = ManualEvent;
 
 unittest {
 	import vibe.core.core : exitEventLoop, runEventLoop, runTask, sleep;
@@ -1273,24 +1162,6 @@ unittest {
 		try sleep(50.msecs);
 		catch (Exception e) assert(false, e.msg);
 		assert(!w1.running && !w2.running);
-		exitEventLoop();
-	});
-	runEventLoop();
-}
-
-unittest {
-	import vibe.core.core : exitEventLoop, runEventLoop, runTask, sleep;
-	auto e = createManualEvent();
-	// integer overflow test
-	e.m_waiter.m_emitCount = int.max;
-	auto w1 = runTask({ e.waitUninterruptible(50.msecs, e.emitCount); });
-	runTask({
-		try sleep(5.msecs);
-		catch (Exception e) assert(false, e.msg);
-		e.emit();
-		try sleep(50.msecs);
-		catch (Exception e) assert(false, e.msg);
-		assert(!w1.running);
 		exitEventLoop();
 	});
 	runEventLoop();
@@ -1346,77 +1217,46 @@ unittest { // ensure that LocalManualEvent behaves correctly after being copied
 	Note: the ownership can be shared between multiple fibers and threads.
 */
 struct ManualEvent {
-	import core.thread : Thread;
-	import vibe.internal.async : Waitable, asyncAwait, asyncAwaitUninterruptible, asyncAwaitAny;
-	import vibe.internal.list : StackSList;
-
+	import core.atomic, core.internal.spinlock;
 	@safe:
 
 	private {
-		alias ThreadWaiter = ThreadLocalWaiter!true;
-
-		int m_emitCount;
-		static struct Waiters {
-			StackSList!ThreadWaiter active; // actively waiting
-		}
-		Monitor!(Waiters, shared(Mutex)) m_waiters;
+		shared SpinLock lk;
+		shared uint waiters;
+		shared int emitCount;
+		shared Semaphore sem;
 	}
 
-	enum EmitMode {
-		single,
-		all
+	ref unshared() {
+		return *cast(ManualEvent*)&this;
 	}
 
 	@disable this(this);
 
-	private bool canBeFreed()
-	shared nothrow {
-		import core.memory : GC;
-		if (GC.inFinalizer) return true;
-		return m_waiters.lock.active.empty;
-	}
-
 	private void initialize()
 	shared nothrow {
-		m_waiters.initialize(new shared Mutex);
+		lk = SpinLock(SpinLock.Contention.brief);
+		sem = semaphore(0);
 	}
 
 	deprecated("ManualEvent is always non-null!")
 	bool opCast (T : bool) () const shared nothrow { return true; }
 
 	/// A counter that is increased with every emit() call
-	int emitCount() const shared nothrow @trusted { return atomicLoad(m_emitCount); }
+	int emitCount() const shared nothrow @trusted { return atomicLoad(emitCount); }
 
 	/// Emits the signal, waking up all owners of the signal.
 	int emit()
 	shared nothrow @trusted {
 		import core.atomic : atomicOp, cas;
-
-		debug (VibeMutexLog) () @trusted { logTrace("emit shared %s", cast(void*)&this); } ();
-
-		auto ec = atomicOp!"+="(m_emitCount, 1);
-		auto thisthr = Thread.getThis();
-
-		ThreadWaiter lw;
-		auto drv = tryGetEventDriver;
-		m_waiters.lock.active.iterate((ThreadWaiter w) {
-			debug (VibeMutexLog) () @trusted { logTrace("waiter %s", cast(void*)w); } ();
-			if (w.driver is drv) {
-				lw = w;
-				lw.addRef();
-			} else {
-				w.triggerEvent();
-			}
-			return true;
-		});
-		debug (VibeMutexLog) () @trusted { logTrace("lw %s", cast(void*)lw); } ();
-		if (lw) {
-			lw.emit();
-			releaseWaiter(lw);
+		lk.lock();
+		auto ec = ++unshared.emitCount;
+		int wakeUp = waiters;
+		waiters = 0;
+		lk.unlock();
+		if (wakeUp > 0) {
+			sem.trigger(wakeUp);
 		}
-
-		debug (VibeMutexLog) logTrace("emit shared done");
-
 		return ec;
 	}
 
@@ -1424,33 +1264,17 @@ struct ManualEvent {
 	int emitSingle()
 	shared nothrow @trusted {
 		import core.atomic : atomicOp, cas;
-
-		() @trusted { logTrace("emit shared single %s", cast(void*)&this); } ();
-
-		auto ec = atomicOp!"+="(m_emitCount, 1);
-		auto thisthr = Thread.getThis();
-
-		ThreadWaiter lw;
-		auto drv = tryGetEventDriver;
-		m_waiters.lock.active.iterate((ThreadWaiter w) {
-			() @trusted { logTrace("waiter %s", cast(void*)w); } ();
-			if (w.driver is drv) {
-				if (w.unused) return true;
-				lw = w;
-				lw.addRef();
-			} else {
-				w.triggerEvent();
-			}
-			return false;
-		});
-		() @trusted { logTrace("lw %s", cast(void*)lw); } ();
-		if (lw) {
-			lw.emitSingle();
-			releaseWaiter(lw);
+		lk.lock();
+		auto ec = ++unshared.emitCount;
+		bool wakeUp = false;
+		if (waiters > 0)
+			wakeUp = true;
+			waiters -= 1;
 		}
-
-		logTrace("emit shared done");
-
+		lk.unlock();
+		if (wakeUp) {
+			sem.trigger(1);
+		}
 		return ec;
 	}
 
@@ -1467,95 +1291,32 @@ struct ManualEvent {
 
 	/** Acquires ownership and waits until the emit count differs from the
 		given one or until a timeout is reached.
-
-		Throws:
-			May throw an $(D InterruptException) if the task gets interrupted
-			using $(D Task.interrupt()).
 	*/
-	int wait(int emit_count) shared { return doWaitShared!true(Duration.max, emit_count); }
+	int wait(int emit_count) shared { return doWaitShared(Duration.max, emit_count); }
 	/// ditto
-	int wait(Duration timeout, int emit_count) shared { return doWaitShared!true(timeout, emit_count); }
+	int wait(Duration timeout, int emit_count) shared { return doWaitShared(timeout, emit_count); }
 
 	/** Same as $(D wait), but defers throwing any $(D InterruptException).
-
-		This method is annotated $(D nothrow) at the expense that it cannot be
-		interrupted.
 	*/
 	int waitUninterruptible() shared nothrow { return waitUninterruptible(this.emitCount); }
 	/// ditto
-	int waitUninterruptible(int emit_count) shared nothrow { return doWaitShared!false(Duration.max, emit_count); }
+	int waitUninterruptible(int emit_count) shared nothrow { return doWaitShared(Duration.max, emit_count); }
 	/// ditto
-	int waitUninterruptible(Duration timeout, int emit_count) shared nothrow { return doWaitShared!false(timeout, emit_count); }
+	int waitUninterruptible(Duration timeout, int emit_count) shared nothrow { return doWaitShared(timeout, emit_count); }
 
-	private int doWaitShared(bool interruptible)(Duration timeout, int emit_count)
+	private int doWaitShared(Duration timeout, int emit_count)
 	shared {
-		import core.time : MonoTime;
-
-		() @trusted { logTrace("wait shared %s", cast(void*)&this); } ();
-
-		MonoTime target_timeout, now;
-		if (timeout != Duration.max) {
-			try now = MonoTime.currTime();
-			catch (Exception e) { assert(false, e.msg); }
-			target_timeout = now + timeout;
-		}
-
-		int ec = this.emitCount;
-
-		acquireThreadWaiter((scope ThreadWaiter w) {
-			while (ec - emit_count <= 0) {
-				w.wait!interruptible(timeout != Duration.max ? target_timeout - now : Duration.max, () => (this.emitCount - emit_count) > 0);
-				ec = this.emitCount;
-
-				if (timeout != Duration.max) {
-					try now = MonoTime.currTime();
-					catch (Exception e) { assert(false, e.msg); }
-					if (now >= target_timeout) break;
-				}
+		//TODO: awitAny with timeout + a bit of trickery with tryWait (e.g. attempt truly non-blocking read)
+		for(;;) {
+			lk.lock();
+			if (emitCount != emit_count) {
+				lk.unlock();
+				return emitCount;
 			}
-		});
-
-		return ec;
-	}
-
-	private void acquireThreadWaiter(DEL)(scope DEL del)
-	shared {
-		ThreadWaiter w;
-		auto drv = tryGetEventDriver;
-
-		with (m_waiters.lock) {
-			active.iterate((aw) {
-				if (aw.driver is drv) {
-					w = aw;
-					w.addRef();
-					return false;
-				}
-				return true;
-			});
-
-			if (!w) {
-				w = allocEventThreadLocalWaiter();
-				assert(w.unique == 1);
-				active.add(w);
-			}
+			waiters += 1;
+			lk.unlock();
+			sem.wait();
 		}
-
-		scope (exit) releaseWaiter(w);
-
-		del(w);
-	}
-
-	private void releaseWaiter(ThreadWaiter w)
-	shared nothrow {
-		assert(w.driver is eventDriver, "Waiter was reassigned a different driver!?");
-		if (w.unique) {
-			assert(w.unused, "Waiter still used, but not referenced!?");
-			with (m_waiters.lock) {
-				auto rmvd = active.remove(w);
-				assert(rmvd, "Waiter not in active queue anymore!?");
-			}
-		}
-		w.releaseRef();
 	}
 }
 

@@ -4,33 +4,14 @@ authors "Sönke Ludwig"
 copyright "Copyright © 2016-2020, Sönke Ludwig"
 license "MIT"
 
-dependency "eventcore" version="~>0.9.27"
 dependency "vibe-container" version=">=1.3.1 <2.0.0-0"
+
+dependency "photon" path="../photon"
 
 targetName "vibe_core"
 
 mainSourceFile "source/vibe/appmain.d"
 
-configuration "winapi" {
-	subConfiguration "eventcore" "winapi"
-	versions "Windows7"
-}
-configuration "epoll" {
-	subConfiguration "eventcore" "epoll"
-}
-configuration "cfrunloop" {
-	subConfiguration "eventcore" "cfrunloop"
-}
-configuration "kqueue" {
-	subConfiguration "eventcore" "kqueue"
-}
-configuration "select" {
-	subConfiguration "eventcore" "select"
-	versions "Windows7" platform="windows"
-}
-//configuration "libasync" {
-//	subConfiguration "eventcore" "libasync"
-//}
 
 buildType "unittest" {
 	buildOptions "unittests" "debugMode" "debugInfo"
