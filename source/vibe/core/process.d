@@ -20,16 +20,12 @@ import std.array;
 import std.typecons;
 import std.exception : enforce;
 import std.algorithm;
-import eventcore.core;
 import vibe.core.path;
 import vibe.core.log;
 import vibe.core.stream;
-import vibe.internal.async;
-import vibe.internal.array : BatchBuffer;
-import vibe.core.internal.release;
 
 @safe:
-
+/+
 /**
 	Register a process with vibe for fibre-aware handling. This process can be
 	started from anywhere including external libraries or std.process.
@@ -824,3 +820,4 @@ string collectOutput(InputStream)(InputStream stream, size_t nbytes = size_t.max
 
 	return output.data;
 }
++/

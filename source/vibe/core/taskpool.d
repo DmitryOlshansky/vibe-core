@@ -6,7 +6,7 @@
 	Authors: Sönke Ludwig
 */
 module vibe.core.taskpool;
-
+/+
 import vibe.core.concurrency : isWeaklyIsolated;
 import vibe.core.core : exitEventLoop, isCallable, isMethod, isNothrowCallable,
 	isNothrowMethod, logicalProcessorCount, runEventLoop, runTask, runTask_internal;
@@ -481,3 +481,4 @@ unittest { // #138 - immutable arguments
 		.joinUninterruptible();
 	tp.terminate();
 }
++/

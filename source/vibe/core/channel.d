@@ -5,7 +5,7 @@
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 */
 module vibe.core.channel;
-
+/+
 import vibe.container.ringbuffer : RingBuffer;
 import vibe.core.sync : TaskCondition;
 import vibe.internal.array : FixedRingBuffer;
@@ -522,3 +522,4 @@ unittest {
 	foreach (m; EnumMembers!ChannelPriority)
 		test(m);
 }
++/

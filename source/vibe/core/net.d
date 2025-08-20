@@ -7,19 +7,17 @@
 */
 module vibe.core.net;
 
-import eventcore.core;
 import std.exception : enforce;
 import std.format : format;
 import std.functional : toDelegate;
 import std.socket : AddressFamily, UnknownAddress;
-import vibe.core.internal.release;
 import vibe.core.log;
 import vibe.core.stream;
 import vibe.internal.async;
 import core.time : Duration;
 
 @safe:
-
+/+
 
 /**
 	Resolves the given host name/IP address string.
@@ -1379,3 +1377,4 @@ unittest {
 	assert(!isMaybeIPAddress("12.com"));
 	assert(!isMaybeIPAddress("1.1.1.t12"));
 }
++/

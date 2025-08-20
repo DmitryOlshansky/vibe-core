@@ -1,5 +1,5 @@
 module vibe.internal.async;
-
+/+
 import std.traits : ParameterTypeTuple, ReturnType;
 import std.typecons : tuple;
 import vibe.core.core : hibernate, switchToTask;
@@ -267,3 +267,4 @@ version (unittest) {
 	alias w = Waitable!(CB, wait, cancel, done);
 	static assert (__traits(compiles, { asyncAwaitAny!(false, w); }));
 }
++/

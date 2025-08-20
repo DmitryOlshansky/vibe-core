@@ -9,16 +9,12 @@ module vibe.core.core;
 
 public import vibe.core.task;
 
-import eventcore.core;
 import vibe.container.ringbuffer : RingBuffer;
 import vibe.core.args;
 import vibe.core.concurrency;
-import vibe.core.internal.release;
 import vibe.core.log;
 import vibe.core.sync : ManualEvent, createSharedManualEvent;
-import vibe.core.taskpool : TaskPool;
 import vibe.internal.async;
-//import vibe.utils.array;
 import std.algorithm;
 import std.conv;
 import std.encoding;
@@ -2167,3 +2163,4 @@ version(Posix)
 		assert(false);
 	}
 }
++/

@@ -6,7 +6,7 @@
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 */
 module vibe.core.parallelism;
-
+/+
 public import vibe.core.taskpool;
 
 import vibe.core.channel;
@@ -306,3 +306,4 @@ unittest {
 	assert(res.length == 99);
 	assert(res.front == 2);
 }
++/

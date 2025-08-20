@@ -22,9 +22,7 @@ import core.time;
 import std.algorithm;
 import std.conv;
 
-public import eventcore.driver : IOMode;
-
-
+/+
 /** Pipes an InputStream directly into this OutputStream.
 
 	The number of bytes written is either the whole input stream when
@@ -584,3 +582,4 @@ mixin template validateTruncatableStream(T) { import vibe.internal.traits : vali
 	See_Also: `isClosableRandomAccessStream`
 */
 mixin template validateClosableRandomAccessStream(T) { import vibe.internal.traits : validateInterfaceConformance; mixin validateInterfaceConformance!(T, .ClosableRandomAccessStream); }
++/

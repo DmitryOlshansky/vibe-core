@@ -23,7 +23,7 @@ import vibe.core.task;
 import core.atomic;
 import core.sync.mutex;
 import core.sync.condition;
-import eventcore.core;
+import core.stdc.stdlib;
 import std.exception;
 import std.stdio;
 import std.traits : ReturnType;
@@ -45,7 +45,7 @@ shared(ManualEvent) createSharedManualEvent()
 	ret.initialize();
 	return ret;
 }
-
+/+
 /** Creates a new semaphore object.
 
 	These implementations are a task/fiber compatible replacement for `core.sync.semaphore`.
@@ -1142,12 +1142,103 @@ unittest {
 	new shared InterruptibleTaskCondition(new shared InterruptibleTaskMutex);
 }
 
++/
 
 /** A manually triggered single threaded cross-task event.
 
 	Note: the ownership can be shared between multiple fibers of the same thread.
 */
-alias LocalManualEvent = ManualEvent;
+struct LocalManualEvent {
+@safe:
+private:
+	struct Store {
+		shared ManualEvent ev;
+		shared size_t refCount;
+	}
+	Store* store;
+	
+	void initialize() @trusted
+	nothrow {
+		import std.algorithm.mutation;
+		store = cast(Store*)calloc(Store.sizeof, 1);
+		store.ev.initialize();
+		store.refCount = 1;
+	}
+public:
+	this(this)
+	nothrow {
+		if (store) {
+			atomicFetchAdd(store.refCount, 1);
+		}
+	}
+
+	~this() @trusted
+	nothrow {
+		if (store) {
+			auto cnt = atomicFetchSub(store.refCount, 1);
+			if (cnt == 1) {
+				store.ev.__dtor();
+				free(store);
+			}
+		}
+	}
+
+	bool opCast (T : bool) () const nothrow { return store !is null; }
+
+	/// A counter that is increased with every emit() call
+	int emitCount() const nothrow { return store.ev.emitCount; }
+
+	/// Emits the signal, waking up all owners of the signal.
+	int emit()
+	nothrow {
+		return store.ev.emit();
+	}
+
+	/// Emits the signal, waking up a single owners of the signal.
+	int emitSingle()
+	nothrow {
+		return store.ev.emitSingle();
+	}
+
+	/** Acquires ownership and waits until the signal is emitted.
+
+		Note that in order not to miss any emits it is necessary to use the
+		overload taking an integer.
+
+		Throws:
+			May throw an $(D InterruptException) if the task gets interrupted
+			using $(D Task.interrupt()).
+	*/
+	int wait() { return store.ev.wait(this.emitCount); }
+
+	/** Acquires ownership and waits until the signal is emitted and the emit
+		count is larger than a given one.
+
+		Throws:
+			May throw an $(D InterruptException) if the task gets interrupted
+			using $(D Task.interrupt()).
+	*/
+	int wait(int emit_count) { return store.ev.wait(Duration.max, emit_count); }
+	/// ditto
+	int wait(Duration timeout, int emit_count) { return store.ev.wait(timeout, emit_count); }
+
+	/** Same as $(D wait), but defers throwing any $(D InterruptException).
+
+		This method is annotated $(D nothrow) at the expense that it cannot be
+		interrupted.
+	*/
+	int waitUninterruptible() nothrow { return store.ev.waitUninterruptible(this.emitCount); }
+	/// ditto
+	int waitUninterruptible(int emit_count) nothrow { return store.ev.waitUninterruptible(Duration.max, emit_count); }
+	/// ditto
+	int waitUninterruptible(Duration timeout, int emit_count) nothrow { return store.ev.waitUninterruptible(timeout, emit_count); }
+
+	bool opEquals(ref const LocalManualEvent other)
+	const nothrow {
+		return this.store is other.store;
+	}
+}
+
 
 unittest {
 	import vibe.core.core : exitEventLoop, runEventLoop, runTask, sleep;
@@ -1218,16 +1309,16 @@ unittest { // ensure that LocalManualEvent behaves correctly after being copied
 */
 struct ManualEvent {
 	import core.atomic, core.internal.spinlock;
-	@safe:
+@trusted:
 
 	private {
-		shared SpinLock lk;
-		shared uint waiters;
-		shared int emitCount;
-		shared Semaphore sem;
+		SpinLock lk;
+		uint waiters;
+		int _emitCount;
+		Semaphore sem;
 	}
 
-	ref unshared() {
+	ref unshared() shared {
 		return *cast(ManualEvent*)&this;
 	}
 
@@ -1243,16 +1334,16 @@ struct ManualEvent {
 	bool opCast (T : bool) () const shared nothrow { return true; }
 
 	/// A counter that is increased with every emit() call
-	int emitCount() const shared nothrow @trusted { return atomicLoad(emitCount); }
+	int emitCount() const shared nothrow @trusted { return atomicLoad(_emitCount); }
 
 	/// Emits the signal, waking up all owners of the signal.
 	int emit()
-	shared nothrow @trusted {
+	shared nothrow {
 		import core.atomic : atomicOp, cas;
 		lk.lock();
-		auto ec = ++unshared.emitCount;
-		int wakeUp = waiters;
-		waiters = 0;
+		auto ec = ++unshared._emitCount;
+		int wakeUp = unshared.waiters;
+		unshared.waiters = 0;
 		lk.unlock();
 		if (wakeUp > 0) {
 			sem.trigger(wakeUp);
@@ -1262,14 +1353,14 @@ struct ManualEvent {
 
 	/// Emits the signal, waking up at least one waiting task
 	int emitSingle()
-	shared nothrow @trusted {
+	shared nothrow {
 		import core.atomic : atomicOp, cas;
 		lk.lock();
-		auto ec = ++unshared.emitCount;
+		auto ec = ++unshared._emitCount;
 		bool wakeUp = false;
-		if (waiters > 0)
+		if (unshared.waiters > 0) {
 			wakeUp = true;
-			waiters -= 1;
+			unshared.waiters -= 1;
 		}
 		lk.unlock();
 		if (wakeUp) {
@@ -1305,18 +1396,22 @@ struct ManualEvent {
 	int waitUninterruptible(Duration timeout, int emit_count) shared nothrow { return doWaitShared(timeout, emit_count); }
 
 	private int doWaitShared(Duration timeout, int emit_count)
-	shared {
+	shared nothrow {
 		//TODO: awitAny with timeout + a bit of trickery with tryWait (e.g. attempt truly non-blocking read)
 		for(;;) {
 			lk.lock();
-			if (emitCount != emit_count) {
+			if (_emitCount != emit_count) {
 				lk.unlock();
-				return emitCount;
+				return _emitCount;
 			}
-			waiters += 1;
+			unshared.waiters += 1;
 			lk.unlock();
 			sem.wait();
 		}
+	}
+
+	~this() nothrow {
+		sem.dispose();
 	}
 }
 
@@ -1400,7 +1495,7 @@ unittest {
 	}).join();
 }
 
-
+/+
 /** Creates a new monitor primitive for type `T`.
 */
 shared(Monitor!(T, M)) createMonitor(T, M)(M mutex)
@@ -2222,3 +2317,4 @@ final class InterruptibleTaskReadWriteMutex
     /** The policy with which the lock has been created. */
     @property Policy policy() const { return m_state.policy; }
 }
++/

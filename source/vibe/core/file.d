@@ -6,15 +6,11 @@
 	Authors: Sönke Ludwig
 */
 module vibe.core.file;
-
-import eventcore.core : NativeEventDriver, eventDriver;
-import eventcore.driver;
-import vibe.core.internal.release;
+/+
 import vibe.core.log;
 import vibe.core.path;
 import vibe.core.stream;
 import vibe.core.task : Task, TaskSettings;
-import vibe.internal.async : asyncAwait, asyncAwaitUninterruptible;
 
 import core.stdc.stdio;
 import core.sys.posix.unistd;
@@ -1293,3 +1289,4 @@ private struct ListDirectoryRequest {
 	bool followSymlinks;
 	bool function(ref const FileInfo) @safe nothrow directoryPredicate;
 }
++/

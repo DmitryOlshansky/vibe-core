@@ -15,7 +15,7 @@ import core.thread;
 import std.exception;
 import std.traits;
 import std.typecons;
-
+/+
 
 /** Represents a single task as started using vibe.core.runTask.
 
@@ -873,8 +873,6 @@ private ulong callPointer(C)(ref C callable)
 }
 
 package struct TaskScheduler {
-	import eventcore.driver : ExitReason;
-	import eventcore.core : eventDriver;
 
 	private {
 		TaskFiberQueue m_taskQueue;
@@ -1454,3 +1452,4 @@ unittest {
 	static assert(needsMove!V);
 	static assert(!needsMove!W);
 }
++/
