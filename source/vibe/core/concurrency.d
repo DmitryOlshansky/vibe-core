@@ -9,7 +9,7 @@
 	Authors: Sönke Ludwig
 */
 module vibe.core.concurrency;
-/+
+
 public import std.concurrency;
 
 import core.time;
@@ -1076,7 +1076,7 @@ template isCopyable(T)
 	else enum isCopyable = false;
 }
 
-
+/+
 /******************************************************************************/
 /* Future (promise) suppport                                                  */
 /******************************************************************************/
@@ -1458,5 +1458,5 @@ package final class VibedScheduler : Scheduler {
 	}
 }
 
-private shared ConcurrencyPrimitive st_concurrencyPrimitive = ConcurrencyPrimitive.thread;
+private shared ConcurrencyPrimitive st_concurrencyPrimitive = ConcurrencyPrimitive.task;
 +/

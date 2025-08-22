@@ -15,132 +15,8 @@ import core.thread;
 import std.exception;
 import std.traits;
 import std.typecons;
-/+
 
-/** Represents a single task as started using vibe.core.runTask.
-
-	Note that the Task type is considered weakly isolated and thus can be
-	passed between threads using vibe.core.concurrency.send or by passing
-	it as a parameter to vibe.core.core.runWorkerTask.
-*/
-struct Task {
-	private {
-		shared(TaskFiber) m_fiber;
-		size_t m_taskCounter;
-		import std.concurrency : ThreadInfo, Tid;
-		static ThreadInfo s_tidInfo;
-	}
-
-	enum basePriority = 0x00010000;
-
-	private this(TaskFiber fiber, size_t task_counter)
-	@safe nothrow {
-		() @trusted { m_fiber = cast(shared)fiber; } ();
-		m_taskCounter = task_counter;
-	}
-
-	// NOTE: this is a template function to avoid the compiler treating it as a
-	//       move constructor
-	this()(const Task other)
-	@safe nothrow {
-		m_fiber = () @trusted { return cast(shared(TaskFiber))other.m_fiber; } ();
-		m_taskCounter = other.m_taskCounter;
-	}
-
-	/** Returns the Task instance belonging to the calling task.
-	*/
-	static Task getThis() @safe nothrow
-	{
-		auto fiber = () @trusted { return Fiber.getThis(); } ();
-		if (!fiber) return Task.init;
-		auto tfiber = cast(TaskFiber)fiber;
-		if (!tfiber) return Task.init;
-		// FIXME: returning a non-.init handle for a finished task might break some layered logic
-		return Task(tfiber, tfiber.getTaskStatusFromOwnerThread().counter);
-	}
-
-	nothrow {
-		package @property inout(TaskFiber) taskFiber() inout @system { return cast(inout(TaskFiber))m_fiber; }
-		@property inout(Fiber) fiber() inout @system { return this.taskFiber; }
-		@property size_t taskCounter() const @safe { return m_taskCounter; }
-		@property inout(Thread) thread() inout @trusted { if (m_fiber) return this.taskFiber.thread; return null; }
-
-		/** Determines if the task is still running or scheduled to be run.
-		*/
-		@property bool running()
-		const @trusted {
-			assert(m_fiber !is null, "Invalid task handle");
-			auto tf = this.taskFiber;
-			try if (tf.state == Fiber.State.TERM) return false; catch (Throwable) {}
-			auto st = m_fiber.getTaskStatus();
-			if (st.counter != m_taskCounter)
-				return false;
-			return st.initialized;
-		}
-
-		package @property ref ThreadInfo tidInfo() @system { return m_fiber ? taskFiber.tidInfo : s_tidInfo; } // FIXME: this is not thread safe!
-		package @property ref const(ThreadInfo) tidInfo() const @system { return m_fiber ? taskFiber.tidInfo : s_tidInfo; } // FIXME: this is not thread safe!
-
-		/** Gets the `Tid` associated with this task for use with
-			`std.concurrency`.
-		*/
-		@property Tid tid() @trusted { return tidInfo.ident; }
-		/// ditto
-		@property const(Tid) tid() const @trusted { return tidInfo.ident; }
-	}
-
-	T opCast(T)() const @safe nothrow if (is(T == bool)) { return m_fiber !is null; }
-	T opCast(T)() const shared @safe nothrow if (is(T == bool)) { return m_fiber !is null; }
-
-	void join() @trusted { if (m_fiber) m_fiber.join!true(m_taskCounter); }
-	void joinUninterruptible() @trusted nothrow { if (m_fiber) m_fiber.join!false(m_taskCounter); }
-	void interrupt() @trusted nothrow { if (m_fiber && this.running) m_fiber.interrupt(m_taskCounter); }
-
-	unittest { // regression test for bogus "task cannot interrupt itself"
-		import vibe.core.core : runTask;
-		auto t = runTask({});
-		t.join();
-		runTask({ t.interrupt(); }).join();
-	}
-
-	string toString() const @safe { import std.string; return format("%s:%s", () @trusted { return cast(void*)m_fiber; } (), m_taskCounter); }
-
-	void getDebugID(R)(ref R dst)
-	{
-		import std.digest.md : MD5;
-		import std.bitmanip : nativeToLittleEndian;
-		import std.base64 : Base64;
-
-		if (!m_fiber) {
-			dst.put("----");
-			return;
-		}
-
-		MD5 md;
-		md.start();
-		md.put(nativeToLittleEndian(() @trusted { return cast(size_t)cast(void*)m_fiber; } ()));
-		md.put(nativeToLittleEndian(m_taskCounter));
-		Base64.encode(md.finish()[0 .. 3], dst);
-		if (!this.running) dst.put("-fin");
-	}
-	string getDebugID()
-	@trusted {
-		import std.array : appender;
-		auto app = appender!string;
-		getDebugID(app);
-		return app.data;
-	}
-
-	bool opEquals(scope ref const(Task) other) const @safe nothrow {
-		return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter;
-	}
-	bool opEquals(scope const(Task) other) const @safe nothrow {
-		return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter;
-	}
-	bool opEquals(scope shared(const(Task)) other) const shared @safe nothrow {
-		return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter;
-	}
-}
+import photon;
 
 /** Settings to control the behavior of newly started tasks.
 */
@@ -161,7 +37,26 @@ struct TaskSettings {
 	uint priority = Task.basePriority;
 }
 
+/** Controls the priority to use for switching execution to a task.
+*/
+enum TaskSwitchPriority {
+	/** Rescheduled according to the tasks priority
+	*/
+	normal,
 
+	/** Rescheduled with maximum priority.
+
+		The task will resume as soon as the current task yields.
+	*/
+	prioritized,
+
+	/** Switch to the task immediately.
+	*/
+	immediate
+}
+
+
+/+
 /**
 	Implements a task local storage variable.
 
@@ -759,23 +654,6 @@ final package class TaskFiber : Fiber {
 }
 
 
-/** Controls the priority to use for switching execution to a task.
-*/
-enum TaskSwitchPriority {
-	/** Rescheduled according to the tasks priority
-	*/
-	normal,
-
-	/** Rescheduled with maximum priority.
-
-		The task will resume as soon as the current task yields.
-	*/
-	prioritized,
-
-	/** Switch to the task immediately.
-	*/
-	immediate
-}
 
 package struct TaskFuncInfo {
 	void function(ref TaskFuncInfo) func;

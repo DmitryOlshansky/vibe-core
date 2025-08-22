@@ -12,7 +12,7 @@ import vibe.core.log;
 import core.thread;
 import vibe.core.sync;
 import vibe.internal.freelistref;
-
+/+
 /**
 	Generic connection pool class.
 
@@ -319,3 +319,4 @@ unittest {
 	auto c3 = pool.lockConnection();
 	assert(c3.id == 1); // should get the same connection back
 }
++/

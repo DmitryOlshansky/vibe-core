@@ -6,7 +6,7 @@
 	Authors: Sönke Ludwig
 */
 module vibe.core.log;
-/+
+
 import vibe.core.args;
 import vibe.core.concurrency : ScopedLock, lock, isWeaklyIsolated;
 import vibe.core.sync;
@@ -1221,4 +1221,3 @@ unittest { // make sure the default logger doesn't allocate/is usable within fin
 	destroy(t);
 	assert(destroyed);
 }
-+/

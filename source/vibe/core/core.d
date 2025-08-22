@@ -9,12 +9,10 @@ module vibe.core.core;
 
 public import vibe.core.task;
 
-import vibe.container.ringbuffer : RingBuffer;
 import vibe.core.args;
 import vibe.core.concurrency;
 import vibe.core.log;
 import vibe.core.sync : ManualEvent, createSharedManualEvent;
-import vibe.internal.async;
 import std.algorithm;
 import std.conv;
 import std.encoding;
@@ -30,6 +28,13 @@ import core.sync.condition;
 import core.sync.mutex;
 import core.stdc.stdlib;
 import core.thread;
+
+import photon;
+
+enum ExitReason {
+	exited,
+	idle
+}
 
 version(Posix)
 {
@@ -62,7 +67,7 @@ version (Windows)
 /**************************************************************************************************/
 /* Public functions                                                                               */
 /**************************************************************************************************/
-
+/+
 /**
 	Performs final initialization and runs the event loop.
 
@@ -160,7 +165,8 @@ unittest {
 		return runEventLoop();
 	}
 }
-
++/
+private shared static bool loopStarted;
 /**
 	Starts the vibe.d event loop for the calling thread.
 
@@ -181,52 +187,9 @@ unittest {
 */
 int runEventLoop()
 @safe nothrow {
-	setupSignalHandlers();
-
-	logDebug("Starting event loop.");
-	s_eventLoopRunning = true;
-	scope (exit) {
-		eventDriver.core.clearExitFlag();
-		s_eventLoopRunning = false;
-		s_exitEventLoop = false;
-		if (s_isMainThread) atomicStore(st_term, false);
-		() @trusted nothrow {
-			scope (failure) assert(false); // notifyAll is not marked nothrow
-			st_threadShutdownCondition.notifyAll();
-		} ();
+	if (cas(&loopStarted, false, true)) {
+		startloop();
 	}
-
-	// runs any yield()ed tasks first
-	assert(!s_exitEventLoop, "Exit flag set before event loop has started.");
-	s_exitEventLoop = false;
-	performIdleProcessing();
-	if (getExitFlag()) return 0;
-
-	Task exit_task;
-
-	// handle exit flag in the main thread to exit when
-	// exitEventLoop(true) is called from a thread)
-	() @trusted nothrow {
-		if (s_isMainThread)
-			exit_task = runTask(toDelegate(&watchExitFlag));
-	} ();
-
-	while (true) {
-		auto er = s_scheduler.waitAndProcess();
-		if (er != ExitReason.idle || s_exitEventLoop) {
-			logDebug("Event loop exit reason (exit flag=%s): %s", s_exitEventLoop, er);
-			break;
-		}
-		performIdleProcessing();
-	}
-
-	// make sure the exit flag watch task finishes together with this loop
-	// TODO: would be nice to do this without exceptions
-	if (exit_task && exit_task.running)
-		exit_task.interrupt();
-
-	logDebug("Event loop done (scheduled tasks=%s, waiters=%s, thread exit=%s).",
-		s_scheduler.scheduledTaskCount, eventDriver.core.waiterCount, s_exitEventLoop);
 	return 0;
 }
 
@@ -244,20 +207,7 @@ int runEventLoop()
 */
 void exitEventLoop(bool shutdown_all_threads = false)
 @safe nothrow {
-	logDebug("exitEventLoop called (%s)", shutdown_all_threads);
-
-	assert(s_eventLoopRunning || shutdown_all_threads, "Exiting event loop when none is running.");
-	if (shutdown_all_threads) {
-		() @trusted nothrow {
-			shutdownWorkerPool();
-			atomicStore(st_term, true);
-			st_threadsSignal.emit();
-		} ();
-	}
-
-	// shutdown the calling thread
-	s_exitEventLoop = true;
-	if (s_eventLoopRunning) eventDriver.core.exit();
+	// noop
 }
 
 /**
@@ -269,7 +219,7 @@ void exitEventLoop(bool shutdown_all_threads = false)
 */
 bool processEvents()
 @safe nothrow {
-	return !s_scheduler.process().among(ExitReason.exited, ExitReason.outOfWaiters);
+	return true;
 }
 
 /**
@@ -284,10 +234,7 @@ bool processEvents()
 */
 ExitReason runEventLoopOnce(Duration timeout=Duration.max)
 @safe nothrow {
-	auto ret = s_scheduler.waitAndProcess(timeout);
-	if (ret == ExitReason.idle)
-		performIdleProcessing();
-	return ret;
+	return ExitReason.idle;
 }
 
 /**
@@ -300,12 +247,12 @@ ExitReason runEventLoopOnce(Duration timeout=Duration.max)
 */
 void setIdleHandler(void delegate() @safe nothrow del)
 @safe nothrow {
-	s_idleHandler = () @safe nothrow { del(); return false; };
+	//noop
 }
 /// ditto
 void setIdleHandler(bool delegate() @safe nothrow del)
 @safe nothrow {
-	s_idleHandler = del;
+	//noop
 }
 
 /**
@@ -319,45 +266,36 @@ void setIdleHandler(bool delegate() @safe nothrow del)
 */
 Task runTask(ARGS...)(void delegate(ARGS) @safe nothrow task, auto ref ARGS args)
 {
-	return runTask_internal!((ref tfi) { tfi.set(task, args); });
+	return go(() => task(args));
 }
 ///
 Task runTask(ARGS...)(void delegate(ARGS) @system nothrow task, auto ref ARGS args)
 @system {
-	return runTask_internal!((ref tfi) { tfi.set(task, args); });
+	return go(() => task(args));
 }
 /// ditto
 Task runTask(CALLABLE, ARGS...)(CALLABLE task, auto ref ARGS args)
 	if (!is(CALLABLE : void delegate(ARGS)) && isNothrowCallable!(CALLABLE, ARGS))
 {
-	return runTask_internal!((ref tfi) { tfi.set(task, args); });
+	return go(() => task(args));
 }
 /// ditto
 Task runTask(ARGS...)(TaskSettings settings, void delegate(ARGS) @safe nothrow task, auto ref ARGS args)
 {
-	return runTask_internal!((ref tfi) {
-		tfi.settings = settings;
-		tfi.set(task, args);
-	});
+	return go(() => task(args));
 }
 /// ditto
 Task runTask(ARGS...)(TaskSettings settings, void delegate(ARGS) @system nothrow task, auto ref ARGS args)
 @system {
-	return runTask_internal!((ref tfi) {
-		tfi.settings = settings;
-		tfi.set(task, args);
-	});
+	return go(() => task(args));
 }
 /// ditto
 Task runTask(CALLABLE, ARGS...)(TaskSettings settings, CALLABLE task, auto ref ARGS args)
 	if (!is(CALLABLE : void delegate(ARGS)) && isNothrowCallable!(CALLABLE, ARGS))
 {
-	return runTask_internal!((ref tfi) {
-		tfi.settings = settings;
-		tfi.set(task, args);
-	});
+	return go(() => task(args));
 }
-
+/+
 unittest { // test proportional priority scheduling
 	auto tm = setTimer(1000.msecs, { assert(false, "Test timeout"); });
 	scope (exit) tm.stop();
@@ -374,70 +312,21 @@ unittest { // test proportional priority scheduling
 	assert(a + b == 100);
 	assert(b.among(90, 91, 92)); // expect 1:10 ratio +-1
 }
-
++/
 
 /**
 	Runs an asyncronous task that is guaranteed to finish before the caller's
 	scope is left.
 */
-auto runTaskScoped(FT, ARGS)(scope FT callable, ARGS args)
+void runTaskScoped(FT, ARGS)(scope FT callable, ARGS args)
 {
-	static struct S {
-		Task handle;
-
-		@disable this(this);
-
-		~this()
-		{
-			handle.joinUninterruptible();
-		}
-	}
-
-	return S(runTask(callable, args));
-}
-
-package Task runTask_internal(alias TFI_SETUP)()
-{
-	import std.typecons : Tuple, tuple;
-
-	TaskFiber f;
-	while (!f && !s_availableFibers.empty) {
-		f = s_availableFibers.back;
-		s_availableFibers.removeBack();
-		if (() @trusted nothrow { return f.state; } () != Fiber.State.HOLD) f = null;
-	}
-
-	if (f is null) {
-		// if there is no fiber available, create one.
-		if (s_availableFibers.capacity == 0) s_availableFibers.capacity = 1024;
-		logDebugV("Creating new fiber...");
-		f = new TaskFiber;
-	}
-
-	TFI_SETUP(f.m_taskFunc);
-
-	f.bumpTaskCounter();
-	auto handle = f.task();
-
-	debug if (TaskFiber.ms_taskCreationCallback) {
-		TaskCreationInfo info;
-		info.handle = handle;
-		info.functionPointer = () @trusted { return cast(void*)f.m_taskFunc.functionPointer; } ();
-		() @trusted { TaskFiber.ms_taskCreationCallback(info); } ();
-	}
-
-	debug if (TaskFiber.ms_taskEventCallback) {
-		() @trusted { TaskFiber.ms_taskEventCallback(TaskEvent.preStart, handle); } ();
-	}
-
-	debug (VibeTaskLog) logTrace("Switching to newly created task");
-	switchToTask(handle);
-
-	debug if (TaskFiber.ms_taskEventCallback) {
-		() @trusted { TaskFiber.ms_taskEventCallback(TaskEvent.postStart, handle); } ();
-	}
-
-	return handle;
+	auto ev = event(false);
+	go({
+		callable(args);
+		ev.trigger();
+	});
+	ev.wait();
+	ev.dispose(); 
 }
 
 unittest { // ensure task.running is true directly after runTask
@@ -496,29 +385,25 @@ unittest {
 void runWorkerTask(FT, ARGS...)(FT func, auto ref ARGS args)
 	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 {
-	setupWorkerThreads();
-	st_workerPool.runTask(func, args);
+	offload(() => func(args));
 }
 /// ditto
 void runWorkerTask(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
 	if (isNothrowMethod!(shared(T), method, ARGS))
 {
-	setupWorkerThreads();
-	st_workerPool.runTask!method(object, args);
+	offload(() => method(object, args));
 }
 /// ditto
 void runWorkerTask(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
 	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 {
-	setupWorkerThreads();
-	st_workerPool.runTask(settings, func, args);
+	offload(() => func(args));
 }
 /// ditto
 void runWorkerTask(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
 	if (isNothrowMethod!(shared(T), method, ARGS))
 {
-	setupWorkerThreads();
-	st_workerPool.runTask!method(settings, object, args);
+	offload(() => func(args));
 }
 
 
@@ -534,31 +419,43 @@ void runWorkerTask(alias method, T, ARGS...)(TaskSettings settings, shared(T) ob
 Task runWorkerTaskH(FT, ARGS...)(FT func, auto ref ARGS args)
 	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 {
-	setupWorkerThreads();
-	return st_workerPool.runTaskH(func, args);
+	return go((){
+		string code() {
+			string buf = "func(";
+			static foreach (i; 0..ARGS.length) {
+				if (i != 0)
+					buf ~= ",";
+				static if (!isCopyable!(ARGS[i])) {
+					buf ~= format("move(args[%d])", i);
+				} else {
+					buf ~= format("args[%d]", i);
+				}
+			}
+			buf ~= ");";
+			return buf;
+		}
+		mixin(code());
+	});
 }
 /// ditto
 Task runWorkerTaskH(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
 	if (isNothrowMethod!(shared(T), method, ARGS))
 {
-	setupWorkerThreads();
-	return st_workerPool.runTaskH!method(object, args);
+	return go(() => method(object, args));
 }
 /// ditto
 Task runWorkerTaskH(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
 	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 {
-	setupWorkerThreads();
-	return st_workerPool.runTaskH(settings, func, args);
+	return go(() => func(args));
 }
 /// ditto
 Task runWorkerTaskH(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
 	if (isNothrowMethod!(shared(T), method, ARGS))
 {
-	setupWorkerThreads();
-	return st_workerPool.runTaskH!method(settings, object, args);
+	return go(() => func(args));
 }
-
+/+
 /// Running a worker task using a function
 unittest {
 	static void workerFunc(int param)
@@ -574,7 +471,7 @@ unittest {
 		runWorkerTaskDist(&workerFunc, cast(ubyte)42); // implicit conversion #719
 	}
 }
-
++/
 /// Running a worker task using a class method
 unittest {
 	static class Test {
@@ -678,7 +575,7 @@ unittest { // run and join worker task from outside of a task
 	assert(i == 1);
 }
 
-
+/+
 /**
 	Runs a new asynchronous task in all worker threads concurrently.
 
@@ -738,7 +635,7 @@ void runWorkerTaskDistH(HCB, FT, ARGS...)(TaskSettings settings, scope HCB on_ha
 	setupWorkerThreads();
 	st_workerPool.runTaskDistH(settings, on_handle, func, args);
 }
-
++/
 
 /** Groups together a set of tasks and ensures that no task outlives the group.
 
@@ -861,31 +758,10 @@ unittest {
 */
 public void setupWorkerThreads(uint num = 0)
 @safe nothrow {
-	static bool s_workerThreadsStarted = false;
-	if (s_workerThreadsStarted) return;
-	s_workerThreadsStarted = true;
-
-	if (num == 0) {
-		try num = () @trusted { return logicalProcessorCount(); } ();
-		catch (Exception e) {
-			logException(e, "Failed to get logical processor count, assuming 4.");
-			num = 4;
-		}
-	}
-
-	() @trusted nothrow {
-		st_threadsMutex.lock_nothrow();
-		scope (exit) st_threadsMutex.unlock_nothrow();
-
-		if (!st_workerPool)
-			st_workerPool = new shared TaskPool(num, "vibe-worker");
-
-		if (!st_ioWorkerPool)
-			st_ioWorkerPool = new shared TaskPool(3, "vibe-io");
-	} ();
+	// noop
 }
 
-
+/+
 /** Returns the default worker task pool.
 
 	This pool is used by `runWorkerTask`, `runWorkerTaskH` and
@@ -903,7 +779,7 @@ package @property shared(TaskPool) ioWorkerTaskPool()
 	setupWorkerThreads();
 	return st_ioWorkerPool;
 }
-
++/
 
 /** Determines the number of logical processors in the system.
 
@@ -931,24 +807,8 @@ package @property shared(TaskPool) ioWorkerTaskPool()
 */
 void yield()
 @safe {
-	auto t = Task.getThis();
-	if (t != Task.init) {
-		auto tf = () @trusted { return t.taskFiber; } ();
-		tf.handleInterrupt();
-		s_scheduler.yield();
-		tf.handleInterrupt();
-	} else {
-		// avoid recursive event processing, which could result in an infinite
-		// recursion
-		static bool in_yield = false;
-		if (in_yield) return;
-		in_yield = true;
-		scope (exit) in_yield = false;
-
-		// Let yielded tasks execute
-		TaskFiber.getThis().yieldLockCheck();
-		() @safe nothrow { performIdleProcessingOnce(true); } ();
-	}
+	//TODO: yeild in photon
+	delay(1.usecs);
 }
 
 unittest {
@@ -977,22 +837,8 @@ unittest {
 */
 void yieldUninterruptible()
 @safe nothrow {
-	auto t = Task.getThis();
-	if (t != Task.init) {
-		auto tf = () @trusted { return t.taskFiber; } ();
-		s_scheduler.yieldUninterruptible();
-	} else {
-		// avoid recursive event processing, which could result in an infinite
-		// recursion
-		static bool in_yield = false;
-		if (in_yield) return;
-		in_yield = true;
-		scope (exit) in_yield = false;
-
-		// Let yielded tasks execute
-		TaskFiber.getThis().yieldLockCheck();
-		() @safe nothrow { performIdleProcessingOnce(true); } ();
-	}
+	// TODO: yeild in photon
+	delay(1.usecs);
 }
 
 
@@ -1010,16 +856,7 @@ void yieldUninterruptible()
 */
 void hibernate(scope void delegate() @safe nothrow on_interrupt = null)
 @safe nothrow {
-	auto t = Task.getThis();
-	if (t == Task.init) {
-		TaskFiber.getThis().yieldLockCheck();
-		runEventLoopOnce();
-	} else {
-		auto tf = () @trusted { return t.taskFiber; } ();
-		tf.handleInterrupt(on_interrupt);
-		s_scheduler.hibernate();
-		tf.handleInterrupt(on_interrupt);
-	}
+	// noop
 }
 
 
@@ -1043,13 +880,12 @@ void hibernate(scope void delegate() @safe nothrow on_interrupt = null)
 */
 void switchToTask(Task t)
 @safe nothrow {
-	auto defer = TaskFiber.getThis().isInYieldLock();
-	s_scheduler.switchTo(t, defer ? TaskSwitchPriority.prioritized : TaskSwitchPriority.immediate);
+	//noop
 }
 /// ditto
 void switchToTask(Task t, TaskSwitchPriority priority)
 @safe nothrow {
-	s_scheduler.switchTo(t, priority);
+	// noop
 }
 
 
@@ -1083,8 +919,7 @@ void sleep(Duration timeout)
 @safe {
 	assert(timeout >= 0.seconds, "Argument to sleep must not be negative.");
 	if (timeout <= 0.seconds) return;
-	auto tm = setTimer(timeout, null);
-	tm.wait();
+	delay(timeout);
 }
 ///
 unittest {
@@ -1112,11 +947,10 @@ void sleepUninterruptible(Duration timeout)
 @safe nothrow {
 	assert(timeout >= 0.seconds, "Argument to sleep must not be negative.");
 	if (timeout <= 0.seconds) return;
-	auto tm = setTimer(timeout, null);
-	tm.waitUninterruptible();
+	delay(timeout);
 }
 
-
+/+
 /**
 	Creates a new timer, that will fire `callback` after `timeout`
 
@@ -1316,28 +1150,7 @@ Timer createLeanTimer(CALLABLE)(CALLABLE callback)
 {
 	return Timer.create(eventDriver.timers.create(), callback);
 }
-
-
-/**
-	Creates an event to wait on an existing file descriptor.
-
-	The file descriptor usually needs to be a non-blocking socket for this to
-	work.
-
-	Params:
-		file_descriptor = The Posix file descriptor to watch
-		event_mask = Specifies which events will be listened for
-
-	Returns:
-		Returns a newly created FileDescriptorEvent associated with the given
-		file descriptor.
-*/
-FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescriptorEvent.Trigger event_mask)
-@safe nothrow {
-	return FileDescriptorEvent(file_descriptor, event_mask);
-}
-
-
++/
 /**
 	Sets the stack size to use for tasks.
 
@@ -1357,7 +1170,8 @@ FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescripto
 */
 void setTaskStackSize(size_t sz)
 nothrow {
-	TaskFiber.ms_taskStackSize = sz;
+	// TaskFiber.ms_taskStackSize = sz;
+	// noop
 }
 
 
@@ -1373,11 +1187,7 @@ nothrow {
 @property size_t workerThreadCount() nothrow
 	out(count) { assert(count > 0, "No worker threads started after setupWorkerThreads!?"); }
 do {
-	setupWorkerThreads();
-	st_threadsMutex.lock_nothrow();
-	scope (exit) st_threadsMutex.unlock_nothrow();
-
-	return st_workerPool.threadCount;
+	return 1; // TODO: expose from photon
 }
 
 
@@ -1393,8 +1203,7 @@ do {
 */
 void disableDefaultSignalHandlers()
 {
-	synchronized (st_threadsMutex)
-		s_disableSignalHandlers = true;
+	//noop
 }
 
 /**
@@ -1406,6 +1215,7 @@ void disableDefaultSignalHandlers()
 */
 void lowerPrivileges(string uname, string gname)
 @safe {
+	/*
 	if (!isRoot()) return;
 	if (uname != "" || gname != "") {
 		static bool tryParse(T)(string s, out T n)
@@ -1420,135 +1230,21 @@ void lowerPrivileges(string uname, string gname)
 		if (gname != "" && !tryParse(gname, gid)) gid = getGID(gname);
 		setUID(uid, gid);
 	} else logWarn("Vibe was run as root, and no user/group has been specified for privilege lowering. Running with full permissions.");
+	*/
 }
 
 // ditto
 void lowerPrivileges()
 @safe {
-	lowerPrivileges(s_privilegeLoweringUserName, s_privilegeLoweringGroupName);
+	//lowerPrivileges(s_privilegeLoweringUserName, s_privilegeLoweringGroupName);
 }
-
-
-/**
-	Sets a callback that is invoked whenever a task changes its status.
-
-	This function is useful mostly for implementing debuggers that
-	analyze the life time of tasks, including task switches. Note that
-	the callback will only be called for debug builds.
-*/
-void setTaskEventCallback(TaskEventCallback func)
-{
-	debug TaskFiber.ms_taskEventCallback = func;
-}
-
-/**
-	Sets a callback that is invoked whenever new task is created.
-
-	The callback is guaranteed to be invoked before the one set by
-	`setTaskEventCallback` for the same task handle.
-
-	This function is useful mostly for implementing debuggers that
-	analyze the life time of tasks, including task switches. Note that
-	the callback will only be called for debug builds.
-*/
-void setTaskCreationCallback(TaskCreationCallback func)
-{
-	debug TaskFiber.ms_taskCreationCallback = func;
-}
-
 
 /**
 	A version string representing the current vibe.d core version
 */
 enum vibeVersionString = "2.12.0";
 
-
-/**
-	Generic file descriptor event.
-
-	This kind of event can be used to wait for events on a non-blocking
-	file descriptor. Note that this can usually only be used on socket
-	based file descriptors.
-*/
-struct FileDescriptorEvent {
-	/** Event mask selecting the kind of events to listen for.
-	*/
-	enum Trigger {
-		none = 0,         /// Match no event (invalid value)
-		read = 1<<0,      /// React on read-ready events
-		write = 1<<1,     /// React on write-ready events
-		any = read|write  /// Match any kind of event
-	}
-
-	private {
-		static struct Context {
-			Trigger trigger;
-			shared(NativeEventDriver) driver;
-		}
-
-		StreamSocketFD m_socket;
-		Context* m_context;
-	}
-
-	@safe:
-
-	private this(int fd, Trigger event_mask)
-	nothrow {
-		m_socket = eventDriver.sockets.adoptStream(fd);
-		m_context = () @trusted { return &eventDriver.sockets.userData!Context(m_socket); } ();
-		m_context.trigger = event_mask;
-		m_context.driver = () @trusted { return cast(shared)eventDriver; } ();
-	}
-
-	this(this)
-	nothrow {
-		if (m_socket != StreamSocketFD.invalid)
-			eventDriver.sockets.addRef(m_socket);
-	}
-
-	~this()
-	nothrow {
-		if (m_socket != StreamSocketFD.invalid)
-			releaseHandle!"sockets"(m_socket, m_context.driver);
-	}
-
-
-	/** Waits for the selected event to occur.
-
-		Params:
-			which = Optional event mask to react only on certain events
-			timeout = Maximum time to wait for an event
-
-		Returns:
-			The overload taking the timeout parameter returns true if
-			an event was received on time and false otherwise.
-	*/
-	void wait(Trigger which = Trigger.any)
-	{
-		wait(Duration.max, which);
-	}
-	/// ditto
-	bool wait(Duration timeout, Trigger which = Trigger.any)
-	{
-		if ((which & m_context.trigger) == Trigger.none) return true;
-
-		assert((which & m_context.trigger) == Trigger.read, "Waiting for write event not yet supported.");
-
-		bool got_data;
-
-		alias readwaiter = Waitable!(IOCallback,
-			cb => eventDriver.sockets.waitForData(m_socket, cb),
-			cb => eventDriver.sockets.cancelRead(m_socket),
-			(fd, st, nb) { got_data = st == IOStatus.ok; }
-		);
-
-		asyncAwaitAny!(true, readwaiter)(timeout);
-
-		return got_data;
-	}
-}
-
-
+/+
 /**
 	Represents a timer.
 */
@@ -1648,31 +1344,7 @@ struct Timer {
 		return res[1];
 	}
 }
-
-private struct TimerCallbackHandler(CALLABLE) {
-	static __gshared TimerCallbackHandler ms_instance;
-	static @property ref TimerCallbackHandler instance() @trusted nothrow { return ms_instance; }
-
-	void handle(TimerID timer, bool fired)
-	@safe nothrow {
-		if (fired) {
-			auto l = yieldLock();
-			auto cb = () @trusted { return &eventDriver.timers.userData!CALLABLE(timer); } ();
-			static if (is(typeof(CALLABLE.init(Timer.init)))) {
-				Timer tm;
-				tm.m_driver = eventDriver;
-				tm.m_id = timer;
-				eventDriver.timers.addRef(timer);
-				(*cb)(tm);
-			} else (*cb)();
-		}
-
-		if (!eventDriver.timers.isUnique(timer) || eventDriver.timers.isPending(timer))
-			eventDriver.timers.wait(timer, () @trusted { return &handle; } ());
-	}
-}
-
-
++/
 /** Returns an object that ensures that no task switches happen during its life time.
 
 	Any attempt to run the event loop or switching to another task will cause
@@ -1684,53 +1356,9 @@ private struct TimerCallbackHandler(CALLABLE) {
 auto yieldLock(string file = __FILE__, int line = __LINE__)
 @safe nothrow {
 	static struct YieldLock {
-	@safe nothrow:
-		private {
-			TaskFiber m_fiber;
-		}
-
-		private this(TaskFiber fiber) {
-			m_fiber = fiber;
-			inc();
-		}
-		@disable this(this);
-		~this() { if (m_fiber) dec(); }
-
-		private void inc()
-		{
-			m_fiber.acquireYieldLock();
-		}
-
-		private void dec()
-		{
-			m_fiber.releaseYieldLock();
-		}
 	}
 
-	auto fiber = TaskFiber.getThis();
-	fiber.setYieldLockContext(file, line);
-	return YieldLock(fiber);
-}
-
-unittest {
-	auto tf = TaskFiber.getThis();
-	assert(!tf.isInYieldLock());
-	{
-		auto lock = yieldLock();
-		assert(tf.isInYieldLock());
-		{
-			auto lock2 = yieldLock();
-			assert(tf.isInYieldLock());
-		}
-		assert(tf.isInYieldLock());
-	}
-	assert(!tf.isInYieldLock());
-
-	{
-		typeof(yieldLock()) l;
-		assert(!tf.isInYieldLock());
-	}
-	assert(!tf.isInYieldLock());
+	return YieldLock();
 }
 
 
@@ -1738,429 +1366,5 @@ unittest {
 */
 auto taskYieldLock(string file = __FILE__, int line = __LINE__)
 @safe nothrow {
-	if (!Fiber.getThis()) return typeof(yieldLock()).init;
 	return yieldLock(file, line);
 }
-
-debug (VibeRunningTasks) {
-	/** Dumps a list of all active tasks of the calling thread.
-	*/
-	void printRunningTasks()
-	@safe nothrow {
-		string threadname = "unknown";
-		try threadname = Thread.getThis.name;
-		catch (Exception e) {}
-		size_t cnt = 0;
-		foreach (kv; TaskFiber.s_runningTasks.byKeyValue) {
-			auto t = kv.key.task;
-			logInfo("%s (%s): %s", t.getDebugID, threadname, kv.value);
-			cnt++;
-		}
-		logInfo("===================================================");
-		logInfo("%s: %s tasks currently active, %s available",
-			threadname, cnt, s_availableFibers.length);
-	}
-}
-
-
-/**************************************************************************************************/
-/* private types                                                                                  */
-/**************************************************************************************************/
-
-
-private void setupGcTimer()
-{
-	s_gcTimer = createTimer(() @trusted {
-		import core.memory;
-		logTrace("gc idle collect");
-		GC.collect();
-		GC.minimize();
-		s_ignoreIdleForGC = true;
-	});
-	s_gcCollectTimeout = dur!"seconds"(2);
-}
-
-package(vibe) void performIdleProcessing(bool force_process_events = false)
-@safe nothrow {
-	debug (VibeTaskLog) logTrace("Performing idle processing...");
-
-	bool again = !getExitFlag();
-	while (again) {
-		again = performIdleProcessingOnce(force_process_events);
-		force_process_events = true;
-	}
-
-	if (s_scheduler.scheduledTaskCount) logDebug("Exiting from idle processing although there are still yielded tasks");
-
-	if (s_exitEventLoop) return;
-
-	if (!s_ignoreIdleForGC && s_gcTimer) {
-		s_gcTimer.rearm(s_gcCollectTimeout);
-	} else s_ignoreIdleForGC = false;
-}
-
-private bool performIdleProcessingOnce(bool process_events)
-@safe nothrow {
-	if (process_events) {
-		auto er = eventDriver.core.processEvents(0.seconds);
-		if (er.among!(ExitReason.exited, ExitReason.outOfWaiters) && s_scheduler.scheduledTaskCount == 0) {
-			if (s_eventLoopRunning) {
-				logDebug("Setting exit flag due to driver signalling exit: %s", er);
-				s_exitEventLoop = true;
-			}
-			return false;
-		}
-	}
-
-	bool again;
-	if (s_idleHandler)
-		again = s_idleHandler();
-
-	return (s_scheduler.schedule() == ScheduleStatus.busy || again) && !getExitFlag();
-}
-
-
-private struct ThreadContext {
-	Thread thread;
-}
-
-/**************************************************************************************************/
-/* private functions                                                                              */
-/**************************************************************************************************/
-
-private {
-	Duration s_gcCollectTimeout;
-	Timer s_gcTimer;
-	bool s_ignoreIdleForGC = false;
-
-	__gshared core.sync.mutex.Mutex st_threadsMutex;
-	shared TaskPool st_workerPool;
-	shared TaskPool st_ioWorkerPool;
-	shared ManualEvent st_threadsSignal;
-	__gshared ThreadContext[] st_threads;
-	__gshared Condition st_threadShutdownCondition;
-	shared bool st_term = false;
-
-	bool s_isMainThread = false; // set in shared static this
-	bool s_exitEventLoop = false;
-	package bool s_eventLoopRunning = false;
-	bool delegate() @safe nothrow s_idleHandler;
-
-	TaskScheduler s_scheduler;
-	RingBuffer!TaskFiber s_availableFibers;
-	size_t s_maxRecycledFibers = 100;
-
-	string s_privilegeLoweringUserName;
-	string s_privilegeLoweringGroupName;
-	__gshared bool s_disableSignalHandlers = false;
-}
-
-private bool getExitFlag()
-@trusted nothrow {
-	return s_exitEventLoop || atomicLoad(st_term);
-}
-
-package @property bool isEventLoopRunning() @safe nothrow @nogc { return s_eventLoopRunning; }
-package @property ref TaskScheduler taskScheduler() @safe nothrow @nogc { return s_scheduler; }
-
-package bool recycleFiber(TaskFiber fiber)
-@safe nothrow {
-	if (s_availableFibers.length >= s_maxRecycledFibers)
-		return false;
-
-	if (s_availableFibers.full)
-		s_availableFibers.capacity = 2 * s_availableFibers.capacity;
-
-	s_availableFibers.put(fiber);
-	return true;
-}
-
-@safe nothrow unittest { // check fiber recycling and recycling overflow
-	auto tasks = new Task[](s_maxRecycledFibers+1);
-	foreach (i; 0 .. 2) {
-		int nrunning = 0;
-		bool all_running = false;
-		foreach (ref t; tasks) t = runTask({
-			if (++nrunning == tasks.length) all_running = true;
-			while (!all_running)
-				yieldUninterruptible();
-			nrunning--;
-		});
-		foreach (t; tasks) t.joinUninterruptible();
-	}
-}
-
-private void setupSignalHandlers()
-@trusted nothrow {
-	scope (failure) assert(false); // _d_monitorexit is not nothrow
-	__gshared bool s_setup = false;
-
-	// only initialize in main thread
-	synchronized (st_threadsMutex) {
-		if (s_setup) return;
-		s_setup = true;
-
-		if (s_disableSignalHandlers) return;
-
-		logTrace("setup signal handler");
-		version(Posix){
-			// support proper shutdown using signals
-			sigset_t sigset;
-			sigemptyset(&sigset);
-			sigaction_t siginfo;
-			siginfo.sa_handler = &onSignal;
-			siginfo.sa_mask = sigset;
-			siginfo.sa_flags = SA_RESTART;
-			sigaction(SIGINT, &siginfo, null);
-			sigaction(SIGTERM, &siginfo, null);
-
-			siginfo.sa_handler = &onBrokenPipe;
-			sigaction(SIGPIPE, &siginfo, null);
-		}
-
-		version(Windows){
-			// WORKAROUND: we don't care about viral @nogc attribute here!
-			import std.traits;
-			signal(SIGTERM, cast(ParameterTypeTuple!signal[1])&onSignal);
-			signal(SIGINT, cast(ParameterTypeTuple!signal[1])&onSignal);
-		}
-	}
-}
-
-// per process setup
-shared static this()
-{
-	s_isMainThread = true;
-
-	// COMPILER BUG: Must be some kind of module constructor order issue:
-	//    without this, the stdout/stderr handles are not initialized before
-	//    the log module is set up.
-	import std.stdio; File f; f.close();
-
-	initializeLogModule();
-
-	logTrace("create driver core");
-
-	st_threadsMutex = new Mutex;
-	st_threadShutdownCondition = new Condition(st_threadsMutex);
-
-	auto thisthr = Thread.getThis();
-	thisthr.name = "main";
-	assert(st_threads.length == 0, "Main thread not the first thread!?");
-	st_threads ~= ThreadContext(thisthr);
-
-	st_threadsSignal = createSharedManualEvent();
-
-	version(VibeIdleCollect) {
-		logTrace("setup gc");
-		setupGcTimer();
-	}
-
-	version (VibeNoDefaultArgs) {}
-	else {
-		readOption("uid|user", &s_privilegeLoweringUserName, "Sets the user name or id used for privilege lowering.");
-		readOption("gid|group", &s_privilegeLoweringGroupName, "Sets the group name or id used for privilege lowering.");
-	}
-
-	import std.concurrency;
-	scheduler = new VibedScheduler;
-}
-
-shared static ~this()
-{
-	destroy(st_threadsSignal);
-
-	shutdownDriver();
-
-	size_t tasks_left = s_scheduler.scheduledTaskCount;
-
-	if (tasks_left > 0) {
-		logWarn("There were still %d tasks running at exit.", tasks_left);
-
-		debug (VibeRunningTasks)
-			printRunningTasks();
-	}
-}
-
-// per thread setup
-static this()
-{
-	/// workaround for:
-	// object.Exception@src/rt/minfo.d(162): Aborting: Cycle detected between modules with ctors/dtors:
-	// vibe.core.core -> vibe.core.drivers.native -> vibe.core.drivers.libasync -> vibe.core.core
-	if (Thread.getThis().isDaemon && Thread.getThis().name == "CmdProcessor") return;
-
-	auto thisthr = Thread.getThis();
-	synchronized (st_threadsMutex)
-		if (!st_threads.any!(c => c.thread is thisthr))
-			st_threads ~= ThreadContext(thisthr);
-}
-
-static ~this()
-{
-	auto thisthr = Thread.getThis();
-
-	bool is_main_thread = s_isMainThread;
-
-	synchronized (st_threadsMutex) {
-		auto idx = st_threads.countUntil!(c => c.thread is thisthr);
-		logDebug("Thread exit %s (index %s) (main=%s)", thisthr.name, idx, is_main_thread);
-	}
-
-	if (is_main_thread) {
-		logDiagnostic("Main thread exiting");
-		shutdownWorkerPool();
-	}
-
-	foreach (f; s_availableFibers)
-		f.shutdown();
-
-	import vibe.core.internal.threadlocalwaiter : freeThreadResources;
-	freeThreadResources();
-
-	synchronized (st_threadsMutex) {
-		auto idx = st_threads.countUntil!(c => c.thread is thisthr);
-		assert(idx >= 0, "No more threads registered");
-		if (idx >= 0) {
-			st_threads[idx] = st_threads[$-1];
-			st_threads.length--;
-		}
-	}
-
-	// delay deletion of the main event driver to "~shared static this()"
-	if (!is_main_thread) shutdownDriver();
-
-	st_threadShutdownCondition.notifyAll();
-}
-
-private void shutdownWorkerPool()
-nothrow {
-	shared(TaskPool) tpool;
-
-	try synchronized (st_threadsMutex) swap(tpool, st_workerPool);
-	catch (Exception e) assert(false, e.msg);
-
-	if (tpool) {
-		logDiagnostic("Still waiting for worker threads to exit.");
-		tpool.terminate();
-	}
-
-	tpool = null;
-
-	try synchronized (st_threadsMutex) swap(tpool, st_ioWorkerPool);
-	catch (Exception e) assert(false, e.msg);
-
-	if (tpool) {
-		logDiagnostic("Still waiting for I/O worker threads to exit.");
-		tpool.terminate();
-	}
-}
-
-private void shutdownDriver()
-{
-	static if (is(typeof(tryGetEventDriver()))) {
-		// avoid creating an event driver on threads that don't actually have one
-		if (auto drv = tryGetEventDriver())
-			drv.dispose();
-	} else eventDriver.dispose();
-}
-
-
-private void watchExitFlag()
-nothrow {
-	auto emit_count = st_threadsSignal.emitCount;
-	while (true) {
-		{
-			st_threadsMutex.lock_nothrow();
-			scope (exit) st_threadsMutex.unlock_nothrow();
-			if (getExitFlag()) break;
-		}
-
-		try emit_count = st_threadsSignal.wait(emit_count);
-		catch (InterruptException e) return;
-		catch (Exception e) assert(false, e.msg);
-	}
-
-	logDebug("main thread exit");
-	eventDriver.core.exit();
-}
-
-private extern(C) void extrap()
-@safe nothrow {
-	logTrace("exception trap");
-}
-
-private extern(C) void onSignal(int signal)
-nothrow {
-	logInfo("Received signal %d. Shutting down.", signal);
-	atomicStore(st_term, true);
-	try st_threadsSignal.emit();
-	catch (Throwable th) {
-		logDebug("Failed to notify for event loop exit: %s", th.msg);
-	}
-
-	// Stop the event loop of the current thread directly instead of relying on
-	// the st_term mechanic, as the event loop might be in a waiting state, so
-	// that no tasks can get scheduled before an event arrives. Explicitly
-	// exiting the event loop on the other hand always terminates the wait state.
-	if (auto drv = tryGetEventDriver())
-		drv.core.exit();
-}
-
-private extern(C) void onBrokenPipe(int signal)
-nothrow {
-	logTrace("Broken pipe.");
-}
-
-version(Posix)
-{
-	private bool isRoot() @trusted { return geteuid() == 0; }
-
-	private void setUID(int uid, int gid)
-	@trusted {
-		logInfo("Lowering privileges to uid=%d, gid=%d...", uid, gid);
-		if (gid >= 0) {
-			enforce(getgrgid(gid) !is null, "Invalid group id!");
-			enforce(setegid(gid) == 0, "Error setting group id!");
-		}
-		//if( initgroups(const char *user, gid_t group);
-		if (uid >= 0) {
-			enforce(getpwuid(uid) !is null, "Invalid user id!");
-			enforce(seteuid(uid) == 0, "Error setting user id!");
-		}
-	}
-
-	private int getUID(string name)
-	@trusted {
-		auto pw = getpwnam(name.toStringz());
-		enforce(pw !is null, "Unknown user name: "~name);
-		return pw.pw_uid;
-	}
-
-	private int getGID(string name)
-	@trusted {
-		auto gr = getgrnam(name.toStringz());
-		enforce(gr !is null, "Unknown group name: "~name);
-		return gr.gr_gid;
-	}
-} else version(Windows){
-	private bool isRoot() @safe { return false; }
-
-	private void setUID(int uid, int gid)
-	@safe {
-		enforce(false, "UID/GID not supported on Windows.");
-	}
-
-	private int getUID(string name)
-	@safe {
-		enforce(false, "Privilege lowering not supported on Windows.");
-		assert(false);
-	}
-
-	private int getGID(string name)
-	@safe {
-		enforce(false, "Privilege lowering not supported on Windows.");
-		assert(false);
-	}
-}
-+/
