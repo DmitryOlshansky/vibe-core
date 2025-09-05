@@ -176,7 +176,7 @@ struct TaskLocal(T)
 
 	alias storage this;
 }
-
++/
 
 /** Exception that is thrown by Task.interrupt.
 */
@@ -186,7 +186,7 @@ class InterruptException : Exception {
 		super("Task interrupted.");
 	}
 }
-
+/+
 /**
 	High level state change events for a Task
 */
@@ -1287,6 +1287,7 @@ package string callWithMove(ARGS...)(string func, string args)
 	}
 	return ret ~ ");";
 }
++/
 
 package template needsMove(T)
 {
@@ -1330,4 +1331,3 @@ unittest {
 	static assert(needsMove!V);
 	static assert(!needsMove!W);
 }
-+/

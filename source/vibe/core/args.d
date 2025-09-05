@@ -15,7 +15,7 @@ module vibe.core.args;
 
 import vibe.core.log;
 import std.json;
-/+
+
 import std.algorithm : any, map, sort;
 import std.array : array, join, replicate, split;
 import std.exception;
@@ -320,4 +320,3 @@ private enum configName = "vibe.conf";
 private template ValueTuple(T...) { alias ValueTuple = T; }
 
 private alias getoptConfig = ValueTuple!(std.getopt.config.passThrough, std.getopt.config.bundling);
-+/

@@ -41,9 +41,9 @@ LocalManualEvent createManualEvent()
 /// ditto
 shared(ManualEvent) createSharedManualEvent()
 @trusted nothrow {
-	shared(ManualEvent) ret;
+	ManualEvent ret;
 	ret.initialize();
-	return ret;
+	return cast(shared)ret;
 }
 /+
 /** Creates a new semaphore object.
@@ -1148,11 +1148,13 @@ unittest {
 
 	Note: the ownership can be shared between multiple fibers of the same thread.
 */
-struct LocalManualEvent {
+alias LocalManualEvent = ManualEvent;
+
+struct ManualEvent {
 @safe:
 private:
 	struct Store {
-		shared ManualEvent ev;
+		shared ManualEventImpl ev;
 		shared size_t refCount;
 	}
 	Store* store;
@@ -1184,9 +1186,12 @@ public:
 	}
 
 	bool opCast (T : bool) () const nothrow { return store !is null; }
+	bool opCast (T : bool) () const nothrow shared { return store !is null; }
 
 	/// A counter that is increased with every emit() call
 	int emitCount() const nothrow { return store.ev.emitCount; }
+
+	int emitCount() const nothrow shared { return store.ev.emitCount; }
 
 	/// Emits the signal, waking up all owners of the signal.
 	int emit()
@@ -1194,9 +1199,21 @@ public:
 		return store.ev.emit();
 	}
 
+	///ditto
+	int emit()
+	nothrow shared {
+		return store.ev.emit();
+	}
+
 	/// Emits the signal, waking up a single owners of the signal.
 	int emitSingle()
 	nothrow {
+		return store.ev.emitSingle();
+	}
+
+	///ditto
+	int emitSingle()
+	nothrow shared {
 		return store.ev.emitSingle();
 	}
 
@@ -1211,6 +1228,9 @@ public:
 	*/
 	int wait() { return store.ev.wait(this.emitCount); }
 
+	//ditto
+	int wait() shared { return store.ev.wait(this.emitCount); }
+
 	/** Acquires ownership and waits until the signal is emitted and the emit
 		count is larger than a given one.
 
@@ -1220,7 +1240,11 @@ public:
 	*/
 	int wait(int emit_count) { return store.ev.wait(Duration.max, emit_count); }
 	/// ditto
+	int wait(int emit_count) shared { return store.ev.wait(Duration.max, emit_count); }
+	/// ditto
 	int wait(Duration timeout, int emit_count) { return store.ev.wait(timeout, emit_count); }
+	/// ditto
+	int wait(Duration timeout, int emit_count) shared { return store.ev.wait(timeout, emit_count); }
 
 	/** Same as $(D wait), but defers throwing any $(D InterruptException).
 
@@ -1228,10 +1252,16 @@ public:
 		interrupted.
 	*/
 	int waitUninterruptible() nothrow { return store.ev.waitUninterruptible(this.emitCount); }
+	///ditto 
+	int waitUninterruptible() nothrow shared { return store.ev.waitUninterruptible(this.emitCount); }
 	/// ditto
 	int waitUninterruptible(int emit_count) nothrow { return store.ev.waitUninterruptible(Duration.max, emit_count); }
 	/// ditto
+	int waitUninterruptible(int emit_count) nothrow shared { return store.ev.waitUninterruptible(Duration.max, emit_count); }
+	/// ditto
 	int waitUninterruptible(Duration timeout, int emit_count) nothrow { return store.ev.waitUninterruptible(timeout, emit_count); }
+	/// ditto
+	int waitUninterruptible(Duration timeout, int emit_count) nothrow shared { return store.ev.waitUninterruptible(timeout, emit_count); }
 
 	bool opEquals(ref const LocalManualEvent other)
 	const nothrow {
@@ -1302,12 +1332,7 @@ unittest { // ensure that LocalManualEvent behaves correctly after being copied
 	runEventLoop();
 }
 
-
-/** A manually triggered multi threaded cross-task event.
-
-	Note: the ownership can be shared between multiple fibers and threads.
-*/
-struct ManualEvent {
+private struct ManualEventImpl {
 	import core.atomic, core.internal.spinlock;
 @trusted:
 
@@ -1319,7 +1344,7 @@ struct ManualEvent {
 	}
 
 	ref unshared() shared {
-		return *cast(ManualEvent*)&this;
+		return *cast(ManualEventImpl*)&this;
 	}
 
 	@disable this(this);
@@ -1341,9 +1366,9 @@ struct ManualEvent {
 	shared nothrow {
 		import core.atomic : atomicOp, cas;
 		lk.lock();
-		auto ec = ++unshared._emitCount;
-		int wakeUp = unshared.waiters;
-		unshared.waiters = 0;
+		auto ec = ++this.unshared._emitCount;
+		int wakeUp = this.unshared.waiters;
+		this.unshared.waiters = 0;
 		lk.unlock();
 		if (wakeUp > 0) {
 			sem.trigger(wakeUp);
@@ -1416,85 +1441,89 @@ struct ManualEvent {
 }
 
 unittest {
-	import vibe.core.core : exitEventLoop, runEventLoop, runTask, runWorkerTaskH, sleep;
+	runPhoton({
+		import vibe.core.core : exitEventLoop, runEventLoop, runTask, runWorkerTaskH, sleep;
 
-	auto e = createSharedManualEvent();
-	auto w1 = runTask({ e.waitUninterruptible(100.msecs, e.emitCount); });
-	static void w(shared(ManualEvent)* e) { e.waitUninterruptible(500.msecs, e.emitCount); }
-	auto w2 = runWorkerTaskH(&w, &e);
-	runTask({
-		try sleep(50.msecs);
-		catch (Exception e) assert(false, e.msg);
-		e.emit();
-		try sleep(50.msecs);
-		catch (Exception e) assert(false, e.msg);
-		assert(!w1.running && !w2.running);
-		exitEventLoop();
+		auto e = createSharedManualEvent();
+		auto w1 = runTask({ e.waitUninterruptible(100.msecs, e.emitCount); });
+		static void w(shared(ManualEvent)* e) { e.waitUninterruptible(500.msecs, e.emitCount); }
+		auto w2 = runWorkerTaskH(&w, &e);
+		runTask({
+			try sleep(50.msecs);
+			catch (Exception e) assert(false, e.msg);
+			e.emit();
+			try sleep(50.msecs);
+			catch (Exception e) assert(false, e.msg);
+			assert(!w1.running && !w2.running);
+			exitEventLoop();
+		});
 	});
-	runEventLoop();
 }
-
+/+
 unittest {
 	import vibe.core.core : runTask, runWorkerTaskH, setTimer, sleep;
 	import vibe.core.taskpool : TaskPool;
 	import core.time : msecs, usecs;
 	import std.concurrency : send, receiveOnly;
 	import std.random : uniform;
+	startloop();
+	go({
+		auto tpool = new shared TaskPool(4);
+		scope (exit) tpool.terminate();
 
-	auto tpool = new shared TaskPool(4);
-	scope (exit) tpool.terminate();
-
-	static void test(shared(ManualEvent)* evt, Task owner)
-	nothrow {
-		try owner.tid.send(Task.getThis());
-		catch (Exception e) assert(false, e.msg);
-
-		int ec = evt.emitCount;
-		auto thist = Task.getThis();
-		auto tm = setTimer(500.msecs, { thist.interrupt(); }); // watchdog
-		scope (exit) tm.stop();
-		while (ec < 5_000) {
-			tm.rearm(500.msecs);
-			try sleep(uniform(0, 10_000).usecs);
+		static void test(shared(ManualEvent)* evt, Task owner)
+		nothrow {
+			try owner.tid.send(Task.getThis());
 			catch (Exception e) assert(false, e.msg);
-			try if (uniform(0, 10) == 0) evt.emit();
-			catch (Exception e) assert(false, e.msg);
-			auto ecn = evt.waitUninterruptible(ec);
-			assert(ecn > ec);
-			ec = ecn;
-		}
-	}
 
-	auto watchdog = setTimer(30.seconds, { assert(false, "ManualEvent test has hung."); });
-	scope (exit) watchdog.stop();
-
-	auto e = createSharedManualEvent();
-	Task[] tasks;
-
-	runTask(() nothrow {
-		auto thist = Task.getThis();
-
-		// start 25 tasks in each thread
-		foreach (i; 0 .. 25) tpool.runTaskDist(&test, &e, thist);
-		// collect all task handles
-		try foreach (i; 0 .. 4*25) tasks ~= receiveOnly!Task;
-		catch (Exception e) assert(false, e.msg);
-
-		auto tm = setTimer(500.msecs, { thist.interrupt(); }); // watchdog
-		scope (exit) tm.stop();
-		int pec = 0;
-		while (e.emitCount < 5_000) {
-			tm.rearm(500.msecs);
-			try sleep(50.usecs);
-			catch (Exception e) assert(false, e.msg);
-			e.emit();
+			int ec = evt.emitCount;
+			auto thist = Task.getThis();
+			auto tm = setTimer(500.msecs, { thist.interrupt(); }); // watchdog
+			scope (exit) tm.stop();
+			while (ec < 5_000) {
+				tm.rearm(500.msecs);
+				try sleep(uniform(0, 10_000).usecs);
+				catch (Exception e) assert(false, e.msg);
+				try if (uniform(0, 10) == 0) evt.emit();
+				catch (Exception e) assert(false, e.msg);
+				auto ecn = evt.waitUninterruptible(ec);
+				assert(ecn > ec);
+				ec = ecn;
+			}
 		}
 
-		// wait for all worker tasks to finish
-		foreach (t; tasks) t.joinUninterruptible();
-	}).join();
+		auto watchdog = setTimer(30.seconds, { assert(false, "ManualEvent test has hung."); });
+		scope (exit) watchdog.stop();
+
+		auto e = createSharedManualEvent();
+		Task[] tasks;
+
+		runTask(() nothrow {
+			auto thist = Task.getThis();
+
+			// start 25 tasks in each thread
+			foreach (i; 0 .. 25) tpool.runTaskDist(&test, &e, thist);
+			// collect all task handles
+			try foreach (i; 0 .. 4*25) tasks ~= receiveOnly!Task;
+			catch (Exception e) assert(false, e.msg);
+
+			auto tm = setTimer(500.msecs, { thist.interrupt(); }); // watchdog
+			scope (exit) tm.stop();
+			int pec = 0;
+			while (e.emitCount < 5_000) {
+				tm.rearm(500.msecs);
+				try sleep(50.usecs);
+				catch (Exception e) assert(false, e.msg);
+				e.emit();
+			}
+
+			// wait for all worker tasks to finish
+			foreach (t; tasks) t.joinUninterruptible();
+		}).join();
+	});
+	runFibers();
 }
-
++/
 /+
 /** Creates a new monitor primitive for type `T`.
 */

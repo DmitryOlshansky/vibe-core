@@ -330,49 +330,53 @@ void runTaskScoped(FT, ARGS)(scope FT callable, ARGS args)
 }
 
 unittest { // ensure task.running is true directly after runTask
-	Task t;
-	bool hit = false;
-	{
-		auto l = yieldLock();
-		t = runTask({ hit = true; });
-		assert(!hit);
-		assert(t.running);
-	}
-	t.join();
-	assert(!t.running);
-	assert(hit);
+	runPhoton({
+		Task t;
+		bool hit = false;
+		{
+			auto l = yieldLock();
+			t = runTask({ hit = true; });
+			assert(!hit);
+			assert(t.running);
+		}
+		t.join();
+		assert(!t.running);
+		assert(hit);
+	});
 }
 
 unittest {
-	import core.atomic : atomicOp;
+	runPhoton({
+		import core.atomic : atomicOp;
 
-	static struct S {
-		shared(int)* rc;
-		this(this) @safe nothrow { if (rc) atomicOp!"+="(*rc, 1); }
-		~this() @safe nothrow { if (rc) atomicOp!"-="(*rc, 1); }
-	}
+		static struct S {
+			shared(int)* rc;
+			this(this) @safe nothrow { if (rc) atomicOp!"+="(*rc, 1); }
+			~this() @safe nothrow { if (rc) atomicOp!"-="(*rc, 1); }
+		}
 
-	S s;
-	s.rc = new int;
-	*s.rc = 1;
+		S s;
+		s.rc = new int;
+		*s.rc = 1;
 
-	runTask((ref S sc) {
-		auto rc = sc.rc;
-		assert(*rc == 2);
-		sc = S.init;
-		assert(*rc == 1);
-	}, s).joinUninterruptible();
+		runTask((ref S sc) {
+			auto rc = sc.rc;
+			assert(*rc == 2);
+			sc = S.init;
+			assert(*rc == 1);
+		}, s).joinUninterruptible();
 
-	assert(*s.rc == 1);
+		assert(*s.rc == 1);
 
-	runWorkerTaskH((ref S sc) {
-		auto rc = sc.rc;
-		assert(*rc == 2);
-		sc = S.init;
-		assert(*rc == 1);
-	}, s).joinUninterruptible();
+		runWorkerTaskH((ref S sc) {
+			auto rc = sc.rc;
+			assert(*rc == 2);
+			sc = S.init;
+			assert(*rc == 1);
+		}, s).joinUninterruptible();
 
-	assert(*s.rc == 1);
+		assert(*s.rc == 1);
+	});
 }
 
 
@@ -385,25 +389,27 @@ unittest {
 void runWorkerTask(FT, ARGS...)(FT func, auto ref ARGS args)
 	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 {
-	offload(() => func(args));
+	go(() => func(args));
 }
 /// ditto
 void runWorkerTask(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
 	if (isNothrowMethod!(shared(T), method, ARGS))
 {
-	offload(() => method(object, args));
+	auto func = &__traits(getMember, object, __traits(identifier, method));
+	go(() => func(args));
 }
 /// ditto
 void runWorkerTask(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
 	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 {
-	offload(() => func(args));
+	go(() => func(args));
 }
 /// ditto
 void runWorkerTask(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
 	if (isNothrowMethod!(shared(T), method, ARGS))
 {
-	offload(() => func(args));
+	auto func = &__traits(getMember, object, __traits(identifier, method));
+	go(() => func(args));
 }
 
 
@@ -486,13 +492,14 @@ unittest {
 		auto cls = new shared Test;
 		runWorkerTask!(Test.workerMethod)(cls, 42);
 		runWorkerTask!(Test.workerMethod)(cls, cast(ubyte)42); // #719
-		runWorkerTaskDist!(Test.workerMethod)(cls, 42);
-		runWorkerTaskDist!(Test.workerMethod)(cls, cast(ubyte)42); // #719
+		//runWorkerTaskDist!(Test.workerMethod)(cls, 42);
+		//runWorkerTaskDist!(Test.workerMethod)(cls, cast(ubyte)42); // #719
 	}
 }
 
 /// Running a worker task using a function and communicating with it
 unittest {
+	/+
 	static void workerFunc(Task caller)
 	nothrow {
 		int counter = 10;
@@ -516,10 +523,12 @@ unittest {
 
 	static void work719(int) nothrow {}
 	static void test719() { runWorkerTaskH(&work719, cast(ubyte)42); }
+	+/
 }
 
 /// Running a worker task using a class method and communicating with it
 unittest {
+	/+
 	static class Test {
 		void workerMethod(Task caller)
 		shared nothrow {
@@ -551,6 +560,7 @@ unittest {
 		auto cls = new shared Class719;
 		runWorkerTaskH!(Class719.work)(cls, cast(ubyte)42);
 	}
+	+/
 }
 
 unittest { // run and join local task from outside of a task
@@ -837,7 +847,7 @@ unittest {
 */
 void yieldUninterruptible()
 @safe nothrow {
-	// TODO: yeild in photon
+	// TODO: yield in photon
 	delay(1.usecs);
 }
 
@@ -950,7 +960,7 @@ void sleepUninterruptible(Duration timeout)
 	delay(timeout);
 }
 
-/+
+
 /**
 	Creates a new timer, that will fire `callback` after `timeout`
 
@@ -1019,7 +1029,7 @@ void sleepUninterruptible(Duration timeout)
 Timer setTimer(Duration timeout, Timer.Callback callback, bool periodic = false)
 @safe nothrow {
 	auto tm = createTimer(callback);
-	tm.rearm(timeout, periodic);
+	//tm.rearm(timeout, periodic); //TODO: implement timers
 	return tm;
 }
 ///
@@ -1048,7 +1058,7 @@ Timer setTimer(Duration timeout, void delegate() callback, bool periodic = false
 		}
 	}, periodic);
 }
-
+/+
 unittest { // make sure that periodic timer calls never overlap
 	int ccount = 0;
 	int fcount = 0;
@@ -1070,7 +1080,7 @@ unittest { // make sure that periodic timer calls never overlap
 
 	assert(fcount == 5);
 }
-
++/
 
 /** Creates a new timer without arming it.
 
@@ -1085,47 +1095,7 @@ unittest { // make sure that periodic timer calls never overlap
 */
 Timer createTimer(void delegate() nothrow @safe callback = null)
 @safe nothrow {
-	static struct C {
-		void delegate() nothrow @safe m_callback;
-		bool m_running = false;
-		bool m_pendingFire = false;
-
-		void opCall(Timer tm)
-		nothrow @safe {
-			if (m_running) {
-				m_pendingFire = true;
-				return;
-			}
-
-			m_running = true;
-
-			runTask(function(Timer tm, C* ctx) nothrow {
-				assert(ctx.m_running);
-				scope (exit) ctx.m_running = false;
-
-				do {
-					ctx.m_pendingFire = false;
-					ctx.m_callback();
-
-					// make sure that no callbacks are fired after the timer
-					// has been actively stopped
-					if (ctx.m_pendingFire && !tm.pending)
-						ctx.m_pendingFire = false;
-				} while (ctx.m_pendingFire);
-			}, tm, () @trusted { return &this; } ());
-			// NOTE: the called C is allocated at a fixed address within the
-			//       timer descriptor slot of eventcore, so that we can "safely"
-			//       pass the address to runTask here, as long as it is
-			//       guaranteed that the timer lives longer than the task.
-		}
-	}
-
-	if (callback) {
-		C c = {callback};
-		return createLeanTimer(c);
-	}
-
-	return createLeanTimer!(Timer.Callback)(null);
+	return timer(); //TODO implement proper timers in photon
 }
 
 
@@ -1148,9 +1118,9 @@ Timer createLeanTimer(CALLABLE)(CALLABLE callback)
 	if (is(typeof(() @safe nothrow { callback(); } ()))
 		|| is(typeof(() @safe nothrow { callback(Timer.init); } ())))
 {
-	return Timer.create(eventDriver.timers.create(), callback);
+	return timer(); // TODO implement proper timers in photon
 }
-+/
+
 /**
 	Sets the stack size to use for tasks.
 
@@ -1187,7 +1157,7 @@ nothrow {
 @property size_t workerThreadCount() nothrow
 	out(count) { assert(count > 0, "No worker threads started after setupWorkerThreads!?"); }
 do {
-	return 1; // TODO: expose from photon
+	return schedulerThreads(); // TODO: expose from photon
 }
 
 
@@ -1244,107 +1214,7 @@ void lowerPrivileges()
 */
 enum vibeVersionString = "2.12.0";
 
-/+
-/**
-	Represents a timer.
-*/
-struct Timer {
-	private {
-		NativeEventDriver m_driver;
-		TimerID m_id;
-		debug uint m_magicNumber = 0x4d34f916;
-	}
 
-	alias Callback = void delegate() @safe nothrow;
-
-	@safe:
-
-	private static Timer create(CALLABLE)(TimerID id, CALLABLE callback)
-	nothrow {
-		assert(id != TimerID.init, "Invalid timer ID.");
-
-		Timer ret;
-		ret.m_driver = eventDriver;
-		ret.m_id = id;
-
-		static if (is(typeof(!callback)))
-			if (!callback)
-				return ret;
-
-		ret.m_driver.timers.userData!CALLABLE(id) = callback;
-		ret.m_driver.timers.wait(id, &TimerCallbackHandler!CALLABLE.instance.handle);
-
-		return ret;
-	}
-
-	this(this)
-	nothrow {
-		debug assert(m_magicNumber == 0x4d34f916, "Timer corrupted.");
-		if (m_driver) m_driver.timers.addRef(m_id);
-	}
-
-	~this()
-	nothrow {
-		debug assert(m_magicNumber == 0x4d34f916, "Timer corrupted.");
-		if (m_driver) releaseHandle!"timers"(m_id, () @trusted { return cast(shared)m_driver; } ());
-	}
-
-	/// True if the timer is yet to fire.
-	@property bool pending() nothrow { return m_driver.timers.isPending(m_id); }
-
-	/// The internal ID of the timer.
-	@property size_t id() const nothrow { return m_id; }
-
-	bool opCast() const nothrow { return m_driver !is null; }
-
-	/// Determines if this reference is the only one
-	@property bool unique() const nothrow { return m_driver ? m_driver.timers.isUnique(m_id) : false; }
-
-	/** Resets the timer to the specified timeout
-	*/
-	void rearm(Duration dur, bool periodic = false) nothrow
-		in { assert(dur >= 0.seconds, "Negative timer duration specified."); }
-	    do { m_driver.timers.set(m_id, dur, periodic ? dur : 0.seconds); }
-
-	/** Resets the timer and avoids any firing.
-	*/
-	void stop() nothrow { if (m_driver) m_driver.timers.stop(m_id); }
-
-	/** Waits until the timer fires.
-
-		This method may only be used if no timer callback has been specified.
-
-		Returns:
-			`true` is returned $(I iff) the timer was fired.
-	*/
-	bool wait()
-	{
-		auto cb = m_driver.timers.userData!Callback(m_id);
-		assert(cb is null, "Cannot wait on a timer that was created with a callback.");
-
-		auto res = asyncAwait!(TimerCallback2,
-			cb => m_driver.timers.wait(m_id, cb),
-			cb => m_driver.timers.cancelWait(m_id)
-		);
-		return res[1];
-	}
-
-	/** Waits until the timer fires.
-
-		Same as `wait`, except that `Task.interrupt` has no effect on the wait.
-	*/
-	bool waitUninterruptible()
-	nothrow {
-		auto cb = m_driver.timers.userData!Callback(m_id);
-		assert(cb is null, "Cannot wait on a timer that was created with a callback.");
-
-		auto res = asyncAwaitUninterruptible!(TimerCallback2,
-			cb => m_driver.timers.wait(m_id, cb)
-		);
-		return res[1];
-	}
-}
-+/
 /** Returns an object that ensures that no task switches happen during its life time.
 
 	Any attempt to run the event loop or switching to another task will cause

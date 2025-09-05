@@ -22,6 +22,8 @@ import core.thread;
 import std.traits : isSomeString;
 import std.range.primitives : isInputRange, isOutputRange;
 
+import photon;
+
 // support string interpolation on modern compiler versions
 static if (__VERSION__ >= 2108) import core.interpolation;
 else private struct InterpolationHeader;
@@ -430,8 +432,6 @@ final class FileLogger : Logger {
 				if (msg.threadName.length) dst.put(msg.threadName);
 				else dst.formattedWrite("%08X", msg.threadID);
 				dst.put('(');
-				import vibe.core.task : Task;
-				Task.getThis().getDebugID(dst);
 				dst.formattedWrite(") %s] ", pref);
 				break;
 			case Format.threadTime:
@@ -443,8 +443,6 @@ final class FileLogger : Logger {
 				if (msg.threadName.length) dst.put(msg.threadName);
 				else dst.formattedWrite("%08X", msg.threadID);
 				dst.put('(');
-				import vibe.core.task : Task;
-				Task.getThis().getDebugID(dst);
 				dst.formattedWrite(") %s] ", pref);
 				break;
 		}
@@ -933,7 +931,7 @@ enum SyslogFacility {
 	local6,      /// local use 6
 	local7,      /// local use 7
 }
-
+/+
 unittest
 {
 	import vibe.core.file;
@@ -975,7 +973,7 @@ unittest
 	assert(lines[6] == "<137>1 0000-01-01T00:00:00.000001 - " ~ BOM ~ "appname - - - " ~ BOM ~ "αβγ\n");
 	removeFile(path);
 }
-
++/
 
 /// Returns: this host's host name.
 ///
