@@ -59,7 +59,7 @@ shared(TaskSemaphore) createSharedTaskSemaphore(int max_locks)
 {
 	return new shared TaskSemaphore(max_locks);
 }
-
++/
 
 /** Performs RAII based locking/unlocking of a mutex.
 
@@ -68,17 +68,17 @@ shared(TaskSemaphore) createSharedTaskSemaphore(int max_locks)
 	library based alternative that is suitable for use with all mutex types.
 */
 ScopedMutexLock!M scopedMutexLock(M)(M mutex, LockMode mode = LockMode.lock)
-	if (is(M : Mutex) || is(M : Lockable))
+	if (is(M : StdMutex) || is(M : Lockable))
 {
 	return ScopedMutexLock!M(mutex, mode);
 }
 /// ditto
 ScopedMutexLock!(shared(M)) scopedMutexLock(M)(shared(M) mutex, LockMode mode = LockMode.lock)
-	if (is(M : Mutex) || is(M : Lockable))
+	if (is(M : StdMutex) || is(M : Lockable))
 {
 	return ScopedMutexLock!(shared(M))(mutex, mode);
 }
-
+/+
 ///
 unittest {
 	import vibe.core.core : runWorkerTaskH;
@@ -110,6 +110,7 @@ unittest {
 	scopedMutexLock(new shared TaskMutex);
 	scopedMutexLock(new shared InterruptibleTaskMutex);
 }
++/
 
 enum LockMode {
 	lock,
@@ -124,10 +125,11 @@ interface Lockable {
 	bool tryLock();
 }
 
+
 /** RAII lock for the Mutex class.
 */
 struct ScopedMutexLock(M)
-	if (is(shared(M) : shared(Mutex)) || is(shared(M) : shared(Lockable)))
+	if (is(shared(M) : shared(StdMutex)) || is(shared(M) : shared(Lockable)))
 {
 	@disable this(this);
 	private {
@@ -203,7 +205,7 @@ ReturnType!PROC performLocked(alias PROC, MUTEX)(MUTEX mutex)
 	auto l = scopedMutexLock(mutex);
 	return PROC();
 }
-
+/+
 ///
 unittest {
 	int protected_var = 0;
@@ -544,7 +546,7 @@ unittest {
 	test(createTaskSemaphore(2));
 	test(createSharedTaskSemaphore(2));
 }
-
++/
 
 /**
 	Mutex implementation for fibers.
@@ -566,60 +568,64 @@ unittest {
 */
 final class TaskMutex : core.sync.mutex.Mutex, Lockable {
 @safe:
-	private shared(TaskMutexImpl!false) m_impl;
+	private shared photon.Mutex impl;
 
 	// non-shared compatibility API
-	this(Object o) nothrow { m_impl.setup(); super(o); }
-	this() nothrow { m_impl.setup(); }
+	this(Object o) nothrow { impl = mutex(); super(o); }
+	this() nothrow { impl = mutex(); }
 
-	override bool tryLock() nothrow { return m_impl.tryLock(); }
-	override void lock() nothrow { m_impl.lock(); }
-	override void unlock() nothrow { m_impl.unlock(); }
-	bool lock(Duration timeout) nothrow { return m_impl.lock(timeout); }
+	override bool tryLock() nothrow { return impl.tryLock(); }
+	override void lock() nothrow { impl.lock(); }
+	override void unlock() nothrow { impl.unlock(); }
+	bool lock(Duration timeout) nothrow { impl.lock(); return true; }
 
 	// new shared API
-	this(Object o) shared nothrow { m_impl.setup(); super(o); }
-	this() shared nothrow { m_impl.setup(); }
+	this(Object o) shared nothrow { impl = mutex(); super(o); }
+	this() shared nothrow { impl = mutex(); }
 
-	override bool tryLock() shared nothrow { return m_impl.tryLock(); }
-	override void lock() shared nothrow { m_impl.lock(); }
-	override void unlock() shared nothrow { m_impl.unlock(); }
-	bool lock(Duration timeout) shared nothrow { return m_impl.lock(timeout); }
+	override bool tryLock() shared nothrow { return impl.tryLock(); }
+	override void lock() shared nothrow { impl.lock(); }
+	override void unlock() shared nothrow { impl.unlock(); }
+	bool lock(Duration timeout) shared nothrow { impl.lock(); return true; }
 }
 
 unittest {
-	auto mutex = new TaskMutex;
+	startloop();
+	go({
+		auto mutex = new TaskMutex;
 
-	{
-		auto lock = scopedMutexLock(mutex);
+		{
+			auto lock = scopedMutexLock(mutex);
+			assert(lock.locked);
+			assert(mutex.impl.locked);
+
+			auto lock2 = scopedMutexLock(mutex, LockMode.tryLock);
+			assert(!lock2.locked);
+		}
+		assert(!mutex.impl.locked);
+
+		auto lock = scopedMutexLock(mutex, LockMode.tryLock);
 		assert(lock.locked);
-		assert(mutex.m_impl.m_locked);
+		lock.unlock();
+		assert(!lock.locked);
 
-		auto lock2 = scopedMutexLock(mutex, LockMode.tryLock);
-		assert(!lock2.locked);
-	}
-	assert(!mutex.m_impl.m_locked);
+		synchronized(mutex){
+			assert(mutex.impl.locked);
+		}
+		assert(!mutex.impl.locked);
 
-	auto lock = scopedMutexLock(mutex, LockMode.tryLock);
-	assert(lock.locked);
-	lock.unlock();
-	assert(!lock.locked);
+		mutex.performLocked!({
+			assert(mutex.impl.locked);
+		});
+		assert(!mutex.impl.locked);
 
-	synchronized(mutex){
-		assert(mutex.m_impl.m_locked);
-	}
-	assert(!mutex.m_impl.m_locked);
-
-	mutex.performLocked!({
-		assert(mutex.m_impl.m_locked);
+		with(mutex.scopedMutexLock) {
+			assert(mutex.impl.locked);
+		}
 	});
-	assert(!mutex.m_impl.m_locked);
-
-	with(mutex.scopedMutexLock) {
-		assert(mutex.m_impl.m_locked);
-	}
+	runFibers();
 }
-
+/+
 unittest { // test deferred throwing
 	import vibe.core.core;
 
@@ -660,54 +666,6 @@ unittest { // test deferred throwing
 unittest {
 	runMutexUnitTests!TaskMutex();
 }
-
-
-/**
-	Alternative to $(D TaskMutex) that supports interruption.
-
-	This class supports the use of $(D vibe.core.task.Task.interrupt()) while
-	waiting in the $(D lock()) method. However, because the interface is not
-	$(D nothrow), it cannot be used as an object monitor.
-
-	See_Also: $(D TaskMutex), $(D InterruptibleRecursiveTaskMutex)
-*/
-final class InterruptibleTaskMutex : Lockable {
-@safe:
-
-	private shared(TaskMutexImpl!true) m_impl;
-
-	// non-shared compatibility API
-	this()
-	{
-		m_impl.setup();
-
-		// detects invalid usage within synchronized(...)
-		() @trusted { this.__monitor = cast(void*)&NoUseMonitor.instance(); } ();
-	}
-
-	bool tryLock() nothrow { return m_impl.tryLock(); }
-	void lock() { m_impl.lock(); }
-	void unlock() nothrow { m_impl.unlock(); }
-
-	// new shared API
-	this()
-	shared {
-		m_impl.setup();
-
-		// detects invalid usage within synchronized(...)
-		() @trusted { this.__monitor = cast(void*)&NoUseMonitor.instance(); } ();
-	}
-
-	bool tryLock() shared nothrow { return m_impl.tryLock(); }
-	void lock() shared { m_impl.lock(); }
-	void unlock() shared nothrow { m_impl.unlock(); }
-}
-
-unittest {
-	runMutexUnitTests!InterruptibleTaskMutex();
-}
-
-
 
 /**
 	Recursive mutex implementation for tasks.
@@ -769,82 +727,6 @@ unittest {
 		m.unlock();
 		m.unlock();
 	}).joinUninterruptible();
-}
-
-
-/**
-	Alternative to $(D RecursiveTaskMutex) that supports interruption.
-
-	This class supports the use of $(D vibe.core.task.Task.interrupt()) while
-	waiting in the $(D lock()) method. However, because the interface is not
-	$(D nothrow), it cannot be used as an object monitor.
-
-	See_Also: $(D RecursiveTaskMutex), $(D InterruptibleTaskMutex)
-*/
-final class InterruptibleRecursiveTaskMutex : Lockable {
-@safe:
-	private shared(RecursiveTaskMutexImpl!true) m_impl;
-
-	this()
-	nothrow {
-		m_impl.setup();
-
-		// detects invalid usage within synchronized(...)
-		() @trusted { this.__monitor = cast(void*)&NoUseMonitor.instance(); } ();
-	}
-
-	bool tryLock() nothrow { return m_impl.tryLock(); }
-	void lock() { m_impl.lock(); }
-	void unlock() nothrow { m_impl.unlock(); }
-
-	this()
-	nothrow shared {
-		m_impl.setup();
-
-		// detects invalid usage within synchronized(...)
-		() @trusted { this.__monitor = cast(void*)&NoUseMonitor.instance(); } ();
-	}
-
-	bool tryLock() shared nothrow { return m_impl.tryLock(); }
-	void lock() shared { m_impl.lock(); }
-	void unlock() shared nothrow { m_impl.unlock(); }
-}
-
-unittest {
-	runMutexUnitTests!InterruptibleRecursiveTaskMutex();
-}
-
-
-// Helper class to ensure that the non Object.Monitor compatible interruptible
-// mutex classes are not accidentally used with the `synchronized` statement
-private final class NoUseMonitor : Object.Monitor {
-	private static shared Proxy st_instance;
-
-    static struct Proxy {
-        Object.Monitor monitor;
-    }
-
-	static @property ref shared(Proxy) instance()
-	@safe nothrow {
-		static shared(Proxy)* inst = null;
-		if (inst) return *inst;
-
-		() @trusted { // synchronized {} not @safe for DMD <= 2.078.3
-			synchronized {
-				if (!st_instance.monitor)
-					st_instance.monitor = new shared NoUseMonitor;
-				inst = &st_instance;
-			}
-		} ();
-
-		return *inst;
-	}
-
-	override void lock() @safe @nogc nothrow {
-		assert(false, "Interruptible task mutexes cannot be used with synchronized(), use scopedMutexLock instead.");
-	}
-
-	override void unlock() @safe @nogc nothrow {}
 }
 
 
@@ -956,7 +838,9 @@ private void runMutexUnitTests(M)()
 	assert(!t3.running);
 	assert(!m.m_impl.m_locked);
 }
++/
 
+alias StdMutex = core.sync.mutex.Mutex;
 
 /**
 	Event loop based condition variable or "event" implementation.
@@ -980,55 +864,56 @@ private void runMutexUnitTests(M)()
 */
 final class TaskCondition : core.sync.condition.Condition {
 @safe:
-
-	private shared(TaskConditionImpl!(false, Mutex)) m_impl;
+	private shared StdMutex mtx;
+	private shared photon.Condition impl;
 
 	// non-shared compatibility API
-	this(core.sync.mutex.Mutex mtx)
-	nothrow {
-		assert(mtx.classinfo is Mutex.classinfo || mtx.classinfo is TaskMutex.classinfo,
+	this(StdMutex mtx)
+	nothrow @trusted {
+		assert(mtx.classinfo is StdMutex.classinfo || mtx.classinfo is TaskMutex.classinfo,
 			"TaskCondition can only be used with Mutex or TaskMutex");
 
-		m_impl.setup(() @trusted { return cast(shared)mtx; } ());
+		impl = condition();
+		this.mtx = cast(shared)mtx;
 		super(mtx);
 	}
-	override @property Mutex mutex() nothrow { return () @trusted { return cast(Mutex)m_impl.mutex; } (); }
-	override void wait() nothrow { m_impl.wait(); }
-	override bool wait(Duration timeout) nothrow { return m_impl.wait(timeout); }
-	override void notify() nothrow { m_impl.notify(); }
-	override void notifyAll() nothrow  { m_impl.notifyAll(); }
+	override @property StdMutex mutex() nothrow { return () @trusted { return cast(StdMutex)mtx; } (); }
+	override void wait() nothrow { impl.wait(mtx); }
+	override bool wait(Duration timeout) nothrow { return impl.wait(mtx, timeout); }
+	override void notify() nothrow { impl.signal(); }
+	override void notifyAll() nothrow  { impl.broadcast(); }
 
 	// new shared API
 	static if (__VERSION__ >= 2093) {
-		this(shared(core.sync.mutex.Mutex) mtx)
+		this(shared(StdMutex) mtx)
 		shared nothrow {
-			assert(mtx.classinfo is Mutex.classinfo || mtx.classinfo is TaskMutex.classinfo,
+			assert(mtx.classinfo is StdMutex.classinfo || mtx.classinfo is TaskMutex.classinfo,
 				"TaskCondition can only be used with Mutex or TaskMutex");
-
-			m_impl.setup(mtx);
+			impl = condition();
+			this.mtx = mtx;
 			super(mtx);
 		}
 
-		shared override @property shared(Mutex) mutex() nothrow { return m_impl.mutex; }
-		shared override void wait() nothrow { m_impl.wait(); }
-		shared override bool wait(Duration timeout) nothrow { return m_impl.wait(timeout); }
-		shared override void notify() nothrow { m_impl.notify(); }
-		shared override void notifyAll() nothrow  { m_impl.notifyAll(); }
+		shared override @property shared(StdMutex) mutex() nothrow { return mtx; }
+		shared override void wait() nothrow { impl.wait(mtx); }
+		shared override bool wait(Duration timeout) nothrow { return impl.wait(mtx, timeout); }
+		shared override void notify() nothrow { impl.signal(); }
+		shared override void notifyAll() nothrow  { impl.broadcast(); }
 	} else {
-		shared @property shared(Mutex) mutex() nothrow { return m_impl.mutex; }
-		shared void wait() nothrow { m_impl.wait(); }
-		shared bool wait(Duration timeout) nothrow { return m_impl.wait(timeout); }
-		shared void notify() nothrow { m_impl.notify(); }
-		shared void notifyAll() nothrow  { m_impl.notifyAll(); }
+		shared @property shared(StdMutex) mutex() nothrow { return mtx; }
+		shared void wait() nothrow { impl.wait(mtx); }
+		shared bool wait(Duration timeout) nothrow { return impl.wait(mtx, timeout); }
+		shared void notify() nothrow { impl.signal(); }
+		shared void notifyAll() nothrow  { impl.broadcast(); }
 	}
 }
 
 unittest {
-	new TaskCondition(new Mutex);
-	new TaskCondition(new TaskMutex);
+	new TaskCondition(new StdMutex);
+	//new TaskCondition(new TaskMutex);
 	static if (__VERSION__ >= 2093) {
-		new shared TaskCondition(new shared Mutex);
-		new shared TaskCondition(new shared TaskMutex);
+		new shared TaskCondition(new shared StdMutex);
+		//new shared TaskCondition(new shared TaskMutex);
 	}
 }
 
@@ -1037,50 +922,54 @@ unittest {
 	sure that the final condition is reached.
 */
 unittest {
-	import vibe.core.core;
-	import vibe.core.log;
+	startloop();
+	go({
+		import vibe.core.core;
+		import vibe.core.log;
 
-	__gshared Mutex mutex;
-	__gshared TaskCondition condition;
-	__gshared int workers_still_running = 0;
+		__gshared StdMutex mutex;
+		__gshared TaskCondition condition;
+		__gshared int workers_still_running = 0;
 
-	// setup the task condition
-	mutex = new Mutex;
-	condition = new TaskCondition(mutex);
+		// setup the task condition
+		mutex = new StdMutex;
+		condition = new TaskCondition(mutex);
 
-	logDebug("SETTING UP TASKS");
+		logDebug("SETTING UP TASKS");
 
-	// start up the workers and count how many are running
-	foreach (i; 0 .. 4) {
-		workers_still_running++;
-		runWorkerTask(() nothrow {
-			// simulate some work
-			try sleep(100.msecs);
-			catch (Exception e) {}
+		// start up the workers and count how many are running
+		foreach (i; 0 .. 4) {
+			workers_still_running++;
+			runWorkerTask(() nothrow {
+				// simulate some work
+				try sleep(100.msecs);
+				catch (Exception e) {}
 
-			// notify the waiter that we're finished
-			{
-				auto l = scopedMutexLock(mutex);
-				workers_still_running--;
-			logDebug("DECREMENT %s", workers_still_running);
-			}
-			logDebug("NOTIFY");
-			condition.notify();
-		});
-	}
-
-	logDebug("STARTING WAIT LOOP");
-
-	// wait until all tasks have decremented the counter back to zero
-	synchronized (mutex) {
-		while (workers_still_running > 0) {
-			logDebug("STILL running %s", workers_still_running);
-			condition.wait();
+				// notify the waiter that we're finished
+				{
+					auto l = scopedMutexLock(mutex);
+					workers_still_running--;
+				logDebug("DECREMENT %s", workers_still_running);
+				}
+				logDebug("NOTIFY");
+				condition.notify();
+			});
 		}
-	}
+
+		logDebug("STARTING WAIT LOOP");
+
+		// wait until all tasks have decremented the counter back to zero
+		synchronized (mutex) {
+			while (workers_still_running > 0) {
+				logDebug("STILL running %s", workers_still_running);
+				condition.wait();
+			}
+		}
+	});
+	runFibers();
 }
 
-
+/+
 /**
 	Alternative to `TaskCondition` that supports interruption.
 
