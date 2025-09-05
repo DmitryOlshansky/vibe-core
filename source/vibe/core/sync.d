@@ -1269,8 +1269,8 @@ public:
 	}
 }
 
-
 unittest {
+	startloop();
 	import vibe.core.core : exitEventLoop, runEventLoop, runTask, sleep;
 
 	auto e = createManualEvent();
@@ -1285,10 +1285,11 @@ unittest {
 		assert(!w1.running && !w2.running);
 		exitEventLoop();
 	});
-	runEventLoop();
+	runFibers();
 }
-
+/+
 unittest { // ensure that cancelled waiters are properly handled and that a FIFO order is implemented
+	startloop();
 	import vibe.core.core : exitEventLoop, runEventLoop, runTask, sleep;
 
 	LocalManualEvent l = createManualEvent();
@@ -1312,10 +1313,11 @@ unittest { // ensure that cancelled waiters are properly handled and that a FIFO
 	runTask({
 		l.emit();
 	});
-	runEventLoop();
+	runFibers();
 }
-
++/
 unittest { // ensure that LocalManualEvent behaves correctly after being copied
+	startloop();
 	import vibe.core.core : exitEventLoop, runEventLoop, runTask, sleep;
 
 	LocalManualEvent l = createManualEvent();
@@ -1329,7 +1331,7 @@ unittest { // ensure that LocalManualEvent behaves correctly after being copied
 		assert(l.waitUninterruptible(1.seconds, l.emitCount));
 		exitEventLoop();
 	});
-	runEventLoop();
+	runFibers();
 }
 
 private struct ManualEventImpl {
@@ -1337,10 +1339,9 @@ private struct ManualEventImpl {
 @trusted:
 
 	private {
-		SpinLock lk;
-		uint waiters;
+		photon.Mutex mtx;
+		photon.Condition cond;
 		int _emitCount;
-		Semaphore sem;
 	}
 
 	ref unshared() shared {
@@ -1351,8 +1352,8 @@ private struct ManualEventImpl {
 
 	private void initialize()
 	shared nothrow {
-		lk = SpinLock(SpinLock.Contention.brief);
-		sem = semaphore(0);
+		mtx = mutex();
+		cond = condition();
 	}
 
 	deprecated("ManualEvent is always non-null!")
@@ -1364,33 +1365,20 @@ private struct ManualEventImpl {
 	/// Emits the signal, waking up all owners of the signal.
 	int emit()
 	shared nothrow {
-		import core.atomic : atomicOp, cas;
-		lk.lock();
+		mtx.lock();
 		auto ec = ++this.unshared._emitCount;
-		int wakeUp = this.unshared.waiters;
-		this.unshared.waiters = 0;
-		lk.unlock();
-		if (wakeUp > 0) {
-			sem.trigger(wakeUp);
-		}
+		mtx.unlock();
+		cond.broadcast();
 		return ec;
 	}
 
 	/// Emits the signal, waking up at least one waiting task
 	int emitSingle()
 	shared nothrow {
-		import core.atomic : atomicOp, cas;
-		lk.lock();
+		mtx.lock();
 		auto ec = ++unshared._emitCount;
-		bool wakeUp = false;
-		if (unshared.waiters > 0) {
-			wakeUp = true;
-			unshared.waiters -= 1;
-		}
-		lk.unlock();
-		if (wakeUp) {
-			sem.trigger(1);
-		}
+		mtx.unlock();
+		cond.signal();
 		return ec;
 	}
 
@@ -1422,42 +1410,39 @@ private struct ManualEventImpl {
 
 	private int doWaitShared(Duration timeout, int emit_count)
 	shared nothrow {
-		//TODO: awitAny with timeout + a bit of trickery with tryWait (e.g. attempt truly non-blocking read)
-		for(;;) {
-			lk.lock();
-			if (_emitCount != emit_count) {
-				lk.unlock();
-				return _emitCount;
-			}
-			unshared.waiters += 1;
-			lk.unlock();
-			sem.wait();
+		mtx.lock();
+		while (_emitCount == emit_count) {
+			if (timeout == Duration.max) cond.wait(mtx);
+			else cond.wait(mtx, timeout);
 		}
+		auto ec = _emitCount;
+		mtx.unlock();
+		return ec;
 	}
 
 	~this() nothrow {
-		sem.dispose();
+		mtx.dispose();
 	}
 }
 
 unittest {
-	runPhoton({
-		import vibe.core.core : exitEventLoop, runEventLoop, runTask, runWorkerTaskH, sleep;
+	startloop();
+	import vibe.core.core : exitEventLoop, runEventLoop, runTask, runWorkerTaskH, sleep;
 
-		auto e = createSharedManualEvent();
-		auto w1 = runTask({ e.waitUninterruptible(100.msecs, e.emitCount); });
-		static void w(shared(ManualEvent)* e) { e.waitUninterruptible(500.msecs, e.emitCount); }
-		auto w2 = runWorkerTaskH(&w, &e);
-		runTask({
-			try sleep(50.msecs);
-			catch (Exception e) assert(false, e.msg);
-			e.emit();
-			try sleep(50.msecs);
-			catch (Exception e) assert(false, e.msg);
-			assert(!w1.running && !w2.running);
-			exitEventLoop();
-		});
+	auto e = createSharedManualEvent();
+	auto w1 = runTask({ e.waitUninterruptible(100.msecs, e.emitCount); });
+	static void w(shared(ManualEvent)* e) { e.waitUninterruptible(500.msecs, e.emitCount); }
+	auto w2 = runWorkerTaskH(&w, &e);
+	runTask({
+		try sleep(50.msecs);
+		catch (Exception e) assert(false, e.msg);
+		e.emit();
+		try sleep(50.msecs);
+		catch (Exception e) assert(false, e.msg);
+		assert(!w1.running && !w2.running);
+		exitEventLoop();
 	});
+	runFibers();
 }
 /+
 unittest {

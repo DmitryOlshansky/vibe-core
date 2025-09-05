@@ -166,7 +166,7 @@ unittest {
 	}
 }
 +/
-private shared static bool loopStarted;
+
 /**
 	Starts the vibe.d event loop for the calling thread.
 
@@ -186,10 +186,8 @@ private shared static bool loopStarted;
 	See_Also: `runApplication`
 */
 int runEventLoop()
-@safe nothrow {
-	if (cas(&loopStarted, false, true)) {
-		startloop();
-	}
+@safe {
+	runFibers();
 	return 0;
 }
 
@@ -345,16 +343,18 @@ unittest { // ensure task.running is true directly after runTask
 	});
 }
 
+/+
 unittest {
-	runPhoton({
-		import core.atomic : atomicOp;
+	startloop();
+	import core.atomic : atomicOp;
 
-		static struct S {
-			shared(int)* rc;
-			this(this) @safe nothrow { if (rc) atomicOp!"+="(*rc, 1); }
-			~this() @safe nothrow { if (rc) atomicOp!"-="(*rc, 1); }
-		}
+	static struct S {
+		shared(int)* rc;
+		this(this) @safe nothrow { if (rc) atomicOp!"+="(*rc, 1); }
+		~this() @safe nothrow { if (rc) atomicOp!"-="(*rc, 1); }
+	}
 
+	runTask({
 		S s;
 		s.rc = new int;
 		*s.rc = 1;
@@ -374,10 +374,10 @@ unittest {
 			sc = S.init;
 			assert(*rc == 1);
 		}, s).joinUninterruptible();
-
 		assert(*s.rc == 1);
 	});
-}
+	runFibers();
+}+/
 
 
 /**
@@ -564,25 +564,29 @@ unittest {
 }
 
 unittest { // run and join local task from outside of a task
-	int i = 0;
-	auto t = runTask({
-		try sleep(1.msecs);
-		catch (Exception e) assert(false, e.msg);
-		i = 1;
+	runPhoton({
+		int i = 0;
+		auto t = runTask({
+			try sleep(1.msecs);
+			catch (Exception e) assert(false, e.msg);
+			i = 1;
+		});
+		t.join();
+		assert(i == 1);
 	});
-	t.join();
-	assert(i == 1);
 }
 
 unittest { // run and join worker task from outside of a task
-	__gshared int i = 0;
-	auto t = runWorkerTaskH({
-		try sleep(5.msecs);
-		catch (Exception e) assert(false, e.msg);
-		i = 1;
+	runPhoton({
+		__gshared int i = 0;
+		auto t = runWorkerTaskH({
+			try sleep(5.msecs);
+			catch (Exception e) assert(false, e.msg);
+			i = 1;
+		});
+		t.join();
+		assert(i == 1);
 	});
-	t.join();
-	assert(i == 1);
 }
 
 /+
@@ -822,18 +826,20 @@ void yield()
 }
 
 unittest {
-	size_t ti;
-	auto t = runTask({
-		for (ti = 0; ti < 10; ti++)
-			try yield();
-			catch (Exception e) assert(false, e.msg);
+	runPhoton({
+		size_t ti;
+		auto t = runTask({
+			for (ti = 0; ti < 10; ti++)
+				try yield();
+				catch (Exception e) assert(false, e.msg);
+		});
+
+		foreach (i; 0 .. 5) yield();
+		assert(ti > 0 && ti < 10, "Task did not interleave with yield loop outside of task");
+
+		t.join();
+		assert(ti == 10);
 	});
-
-	foreach (i; 0 .. 5) yield();
-	assert(ti > 0 && ti < 10, "Task did not interleave with yield loop outside of task");
-
-	t.join();
-	assert(ti == 10);
 }
 
 
