@@ -6,7 +6,7 @@
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 */
 module vibe.core.parallelism;
-/+
+
 public import vibe.core.taskpool;
 
 import vibe.core.channel;
@@ -15,6 +15,7 @@ import vibe.core.log;
 import std.range : ElementType, isInputRange;
 import std.traits : hasMember;
 
+version(unittest) import photon : runPhoton;
 
 /** Processes a range of items in worker tasks and returns them as an unordered
 	range.
@@ -142,24 +143,28 @@ auto parallelUnorderedMap(alias fun, R)(R items, ChannelConfig channel_config = 
 
 ///
 unittest {
-	import std.algorithm : isPermutation, map;
-	import std.array : array;
-	import std.range : iota;
+	runPhoton({
+		import std.algorithm : isPermutation, map;
+		import std.array : array;
+		import std.range : iota;
 
-	auto res = iota(100)
-		.parallelMap!(i => 2 * i)
-		.array;
-	assert(res.isPermutation(iota(100).map!(i => 2 * i).array));
+		auto res = iota(100)
+			.parallelMap!(i => 2 * i)
+			.array;
+		assert(res.isPermutation(iota(100).map!(i => 2 * i).array));
+	});
 }
 
 unittest {
-	import std.range : iota;
+	runPhoton({
+		import std.range : iota;
 
-	auto res = iota(100)
-		.parallelUnorderedMap!(i => 2 * i);
-	assert(res.length == 100);
-	res.popFront();
-	assert(res.length == 99);
+		auto res = iota(100)
+			.parallelUnorderedMap!(i => 2 * i);
+		assert(res.length == 100);
+		res.popFront();
+		assert(res.length == 99);
+	});
 }
 
 
@@ -265,45 +270,50 @@ auto parallelMap(alias fun, R)(R items, ChannelConfig channel_config = ChannelCo
 
 ///
 unittest {
-	import std.algorithm : map;
-	import std.array : array;
-	import std.range : iota;
+	runPhoton({
+		import std.algorithm : map;
+		import std.array : array;
+		import std.range : iota;
 
-	auto res = iota(100)
-		.parallelMap!(i => 2 * i)
-		.array;
-	assert(res == iota(100).map!(i => 2 * i).array);
+		auto res = iota(100)
+			.parallelMap!(i => 2 * i)
+			.array;
+		assert(res == iota(100).map!(i => 2 * i).array);
+	});
 }
 
 ///
 unittest {
-	import std.algorithm : isPermutation, map;
-	import std.array : array;
-	import std.random : uniform;
-	import std.range : iota;
-	import core.time : msecs;
-	import vibe.core.core : sleep;
+	runPhoton({
+		import std.algorithm : isPermutation, map;
+		import std.array : array;
+		import std.random : uniform;
+		import std.range : iota;
+		import core.time : msecs;
+		import vibe.core.core : sleep;
 
-	// forcing a random computation result order still results in the same
-	// output order
-	auto res = iota(100)
-		.parallelMap!((i) {
-			sleep(uniform(0, 100).msecs);
-			return 2 * i;
-		})
-		.array;
-	assert(res == iota(100).map!(i => 2 * i).array);
+		// forcing a random computation result order still results in the same
+		// output order
+		auto res = iota(100)
+			.parallelMap!((i) {
+				sleep(uniform(0, 100).msecs);
+				return 2 * i;
+			})
+			.array;
+		assert(res == iota(100).map!(i => 2 * i).array);
+	});
 }
 
 unittest {
-	import std.range : iota;
+	runPhoton({
+		import std.range : iota;
 
-	auto res = iota(100)
-		.parallelMap!(i => 2 * i);
-	assert(res.length == 100);
-	assert(res.front == 0);
-	res.popFront();
-	assert(res.length == 99);
-	assert(res.front == 2);
+		auto res = iota(100)
+			.parallelMap!(i => 2 * i);
+		assert(res.length == 100);
+		assert(res.front == 0);
+		res.popFront();
+		assert(res.length == 99);
+		assert(res.front == 2);
+	});
 }
-+/

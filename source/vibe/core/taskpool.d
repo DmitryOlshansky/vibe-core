@@ -214,6 +214,8 @@ shared final class TaskPool {
 
 	private void runTaskDist_unsafe(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args) {
 		foreach (_; 0..this.threadCount) {
+			import std.stdio;
+			debug writeln(args);
 			go(() => func(args));
 		}
 	}

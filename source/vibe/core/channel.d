@@ -5,14 +5,15 @@
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 */
 module vibe.core.channel;
-/+
+
 import vibe.container.ringbuffer : RingBuffer;
-import vibe.core.sync : TaskCondition;
+import vibe.core.sync : TaskCondition, TaskMutex;
 import vibe.internal.array : FixedRingBuffer;
 
 import std.algorithm.mutation : move, swap;
 import std.exception : enforce;
-import core.sync.mutex;
+
+import photon : startloop, runFibers, go;
 
 // multiple producers allowed, multiple consumers allowed - Q: should this be restricted to allow higher performance? maybe configurable?
 // currently always buffered - TODO: implement blocking non-buffered mode
@@ -170,7 +171,7 @@ private final class ChannelImpl(T, size_t buffer_size) {
 	static assert(isWeaklyIsolated!T, "Channel data type "~T.stringof~" is not safe to pass between threads.");
 
 	private {
-		Mutex m_mutex;
+		TaskMutex m_mutex;
 		TaskCondition m_condition;
 		RingBuffer!(T, buffer_size) m_items;
 		bool m_closed = false;
@@ -180,15 +181,15 @@ private final class ChannelImpl(T, size_t buffer_size) {
 
 	this(ChannelConfig config)
 	shared @trusted nothrow {
-		m_mutex = cast(shared)Mallocator.instance.makeGCSafe!Mutex();
+		m_mutex = cast(shared)Mallocator.instance.makeGCSafe!TaskMutex();
 		m_condition = cast(shared)Mallocator.instance.makeGCSafe!TaskCondition(cast()m_mutex);
 		m_config = config;
 	}
 
 	private void addRef()
 	@safe nothrow shared {
-		m_mutex.lock_nothrow();
-		scope (exit) m_mutex.unlock_nothrow();
+		m_mutex.lock();
+		scope (exit) m_mutex.unlock();
 		auto thisus = () @trusted { return cast(ChannelImpl)this; } ();
 		thisus.m_refCount++;
 	}
@@ -197,8 +198,8 @@ private final class ChannelImpl(T, size_t buffer_size) {
 	@safe nothrow shared {
 		bool destroy = false;
 		{
-			m_mutex.lock_nothrow();
-			scope (exit) m_mutex.unlock_nothrow();
+			m_mutex.lock();
+			scope (exit) m_mutex.unlock();
 			auto thisus = () @trusted { return cast(ChannelImpl)this; } ();
 			if (--thisus.m_refCount == 0)
 				destroy = true;
@@ -216,8 +217,8 @@ private final class ChannelImpl(T, size_t buffer_size) {
 	@property bool empty()
 	shared nothrow {
 		{
-			m_mutex.lock_nothrow();
-			scope (exit) m_mutex.unlock_nothrow();
+			m_mutex.lock();
+			scope (exit) m_mutex.unlock();
 
 			auto thisus = () @trusted { return cast(ChannelImpl)this; } ();
 
@@ -233,8 +234,8 @@ private final class ChannelImpl(T, size_t buffer_size) {
 	@property size_t bufferFill()
 	shared nothrow {
 		{
-			m_mutex.lock_nothrow();
-			scope (exit) m_mutex.unlock_nothrow();
+			m_mutex.lock();
+			scope (exit) m_mutex.unlock();
 
 			auto thisus = () @trusted { return cast(ChannelImpl)this; } ();
 			return thisus.m_items.length;
@@ -244,8 +245,8 @@ private final class ChannelImpl(T, size_t buffer_size) {
 	void close()
 	shared nothrow {
 		{
-			m_mutex.lock_nothrow();
-			scope (exit) m_mutex.unlock_nothrow();
+			m_mutex.lock();
+			scope (exit) m_mutex.unlock();
 
 			auto thisus = () @trusted { return cast(ChannelImpl)this; } ();
 			thisus.m_closed = true;
@@ -259,8 +260,8 @@ private final class ChannelImpl(T, size_t buffer_size) {
 		bool need_notify = false;
 
 		{
-			m_mutex.lock_nothrow();
-			scope (exit) m_mutex.unlock_nothrow();
+			m_mutex.lock();
+			scope (exit) m_mutex.unlock();
 
 			while (thisus.m_items.empty) {
 				if (m_closed) return false;
@@ -313,8 +314,8 @@ private final class ChannelImpl(T, size_t buffer_size) {
 		bool need_notify = false;
 
 		{
-			m_mutex.lock_nothrow();
-			scope (exit) m_mutex.unlock_nothrow();
+			m_mutex.lock();
+			scope (exit) m_mutex.unlock();
 
 			while (thisus.m_items.empty) {
 				if (m_closed) return false;
@@ -345,8 +346,8 @@ private final class ChannelImpl(T, size_t buffer_size) {
 		bool need_notify = false;
 
 		{
-			m_mutex.lock_nothrow();
-			scope (exit) m_mutex.unlock_nothrow();
+			m_mutex.lock();
+			scope (exit) m_mutex.unlock();
 
 			enforce(!m_closed, "Sending on closed channel.");
 			while (thisus.m_items.full)
@@ -367,53 +368,62 @@ private final class ChannelImpl(T, size_t buffer_size) {
 }
 
 deprecated @safe unittest { // test basic operation and non-copyable struct compatiblity
-	import std.exception : assertThrown;
+	startloop();
+	go({
+		import std.exception : assertThrown;
 
-	static struct S {
-		int i;
-		@disable this(this);
-	}
+		static struct S {
+			int i;
+			@disable this(this);
+		}
 
-	auto ch = createChannel!S;
-	ch.put(S(1));
-	assert(ch.consumeOne().i == 1);
-	ch.put(S(4));
-	ch.put(S(5));
-	ch.close();
-	assert(!ch.empty);
-	assert(ch.consumeOne() == S(4));
-	assert(!ch.empty);
-	assert(ch.consumeOne() == S(5));
-	assert(ch.empty);
-	assertThrown(ch.consumeOne());
+		auto ch = createChannel!S;
+		ch.put(S(1));
+		assert(ch.consumeOne().i == 1);
+		ch.put(S(4));
+		ch.put(S(5));
+		ch.close();
+		assert(!ch.empty);
+		assert(ch.consumeOne() == S(4));
+		assert(!ch.empty);
+		assert(ch.consumeOne() == S(5));
+		assert(ch.empty);
+		assertThrown(ch.consumeOne());
+	});
+	runFibers();
 }
 
 @safe unittest { // test basic operation and non-copyable struct compatiblity
-	static struct S {
-		int i;
-		@disable this(this);
-	}
+	startloop();
+	go({
+		static struct S {
+			int i;
+			@disable this(this);
+		}
 
-	auto ch = createChannel!S;
-	S v;
-	ch.put(S(1));
-	assert(ch.tryConsumeOne(v) && v == S(1));
-	ch.put(S(4));
-	ch.put(S(5));
-	{
-		RingBuffer!(S, 100) buf;
-		ch.consumeAll(buf);
-		assert(buf.length == 2);
-		assert(buf[0].i == 4);
-		assert(buf[1].i == 5);
-	}
-	ch.put(S(2));
-	ch.close();
-	assert(ch.tryConsumeOne(v) && v.i == 2);
-	assert(!ch.tryConsumeOne(v));
+		auto ch = createChannel!S;
+		S v;
+		ch.put(S(1));
+		assert(ch.tryConsumeOne(v) && v == S(1));
+		ch.put(S(4));
+		ch.put(S(5));
+		{
+			RingBuffer!(S, 100) buf;
+			ch.consumeAll(buf);
+			assert(buf.length == 2);
+			assert(buf[0].i == 4);
+			assert(buf[1].i == 5);
+		}
+		ch.put(S(2));
+		ch.close();
+		assert(ch.tryConsumeOne(v) && v.i == 2);
+		assert(!ch.tryConsumeOne(v));
+	});
+	runFibers();
 }
 
 deprecated @safe unittest { // test basic operation and non-copyable struct compatiblity
+	startloop();
 	static struct S {
 		int i;
 		@disable this(this);
@@ -439,6 +449,7 @@ deprecated @safe unittest { // test basic operation and non-copyable struct comp
 }
 
 deprecated @safe unittest { // make sure shared(Channel!T) can also be used
+	startloop();
 	shared ch = createChannel!int;
 	ch.put(1);
 	assert(!ch.empty);
@@ -448,6 +459,7 @@ deprecated @safe unittest { // make sure shared(Channel!T) can also be used
 }
 
 @safe unittest { // make sure shared(Channel!T) can also be used
+	startloop();
 	shared ch = createChannel!int;
 	ch.put(1);
 	int v;
@@ -457,6 +469,7 @@ deprecated @safe unittest { // make sure shared(Channel!T) can also be used
 }
 
 @safe unittest { // ensure nothrow'ness for throwing struct
+	startloop();
 	static struct S {
 		this(this) { throw new Exception("meh!"); }
 	}
@@ -477,6 +490,7 @@ deprecated @safe unittest { // make sure shared(Channel!T) can also be used
 }
 
 deprecated @safe unittest { // ensure nothrow'ness for throwing struct
+	startloop();
 	static struct S {
 		this(this) { throw new Exception("meh!"); }
 	}
@@ -497,29 +511,32 @@ deprecated @safe unittest { // ensure nothrow'ness for throwing struct
 }
 
 unittest {
-	import std.traits : EnumMembers;
-	import vibe.core.core : runTask;
+	startloop();
+	go({
+		import std.traits : EnumMembers;
+		import vibe.core.core : runTask;
 
-	void test(ChannelPriority prio)
-	{
-		auto ch = createChannel!int(ChannelConfig(prio));
-		runTask(() nothrow {
-			try {
-				ch.put(1);
-				ch.put(2);
-				ch.put(3);
-			} catch (Exception e) assert(false, e.msg);
-			ch.close();
-		});
+		void test(ChannelPriority prio)
+		{
+			auto ch = createChannel!int(ChannelConfig(prio));
+			runTask(() nothrow {
+				try {
+					ch.put(1);
+					ch.put(2);
+					ch.put(3);
+				} catch (Exception e) assert(false, e.msg);
+				ch.close();
+			});
 
-		int i;
-		assert(ch.tryConsumeOne(i) && i == 1);
-		assert(ch.tryConsumeOne(i) && i == 2);
-		assert(ch.tryConsumeOne(i) && i == 3);
-		assert(!ch.tryConsumeOne(i));
-	}
+			int i;
+			assert(ch.tryConsumeOne(i) && i == 1);
+			assert(ch.tryConsumeOne(i) && i == 2);
+			assert(ch.tryConsumeOne(i) && i == 3);
+			assert(!ch.tryConsumeOne(i));
+		}
 
-	foreach (m; EnumMembers!ChannelPriority)
-		test(m);
+		foreach (m; EnumMembers!ChannelPriority)
+			test(m);
+	});
+	runFibers();
 }
-+/

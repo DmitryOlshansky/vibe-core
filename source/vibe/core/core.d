@@ -13,6 +13,8 @@ import vibe.core.args;
 import vibe.core.concurrency;
 import vibe.core.log;
 import vibe.core.sync : ManualEvent, createSharedManualEvent;
+import vibe.core.taskpool;
+
 import std.algorithm;
 import std.conv;
 import std.encoding;
@@ -821,7 +823,7 @@ package @property shared(TaskPool) ioWorkerTaskPool()
 */
 void yield()
 @safe {
-	//TODO: yeild in photon
+	//TODO: yield in photon
 	delay(1.usecs);
 }
 
@@ -951,6 +953,11 @@ unittest {
 	}
 }
 
+shared TaskPool workerTaskPool;
+
+shared static this() {
+	workerTaskPool = new TaskPool;
+}
 
 /** Suspends the execution of the calling task an an uninterruptible manner.
 

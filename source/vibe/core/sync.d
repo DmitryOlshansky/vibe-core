@@ -608,7 +608,7 @@ private void runMutexUnitTests(M)()
 			assert(m.impl.locked);
 			t1.joinUninterruptible();
 			assert(!t1.running && t2.running);
-			try yield(); // give t2 a chance to take the lock
+			try sleep(1.usecs); // give t2 a chance to take the lock
 			catch (Exception e) assert(false, e.msg);
 			assert(m.impl.locked);
 			t2.joinUninterruptible();
