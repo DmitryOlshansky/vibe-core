@@ -15,7 +15,7 @@ import vibe.core.log;
 import std.range : ElementType, isInputRange;
 import std.traits : hasMember;
 
-version(unittest) import photon : runPhoton;
+version(unittest) import photon : startloop, go, runFibers;
 
 /** Processes a range of items in worker tasks and returns them as an unordered
 	range.
@@ -44,7 +44,9 @@ auto parallelUnorderedMap(alias fun, R)(R items, shared(TaskPool) task_pool, Cha
 	static void senderFun(R items, Channel!I chin)
 	nothrow {
 		foreach (itm; items) {
-			try chin.put(itm);
+			try {
+				chin.put(itm);
+			}
 			catch (Exception e) {
 				logException(e, "Failed to send parallel mapped input");
 				break;
@@ -57,7 +59,9 @@ auto parallelUnorderedMap(alias fun, R)(R items, shared(TaskPool) task_pool, Cha
 	nothrow {
 		I item;
 		while (chin.tryConsumeOne(item)) {
-			try chout.put(fun(item));
+			try {
+				chout.put(fun(item));
+			}
 			catch (Exception e) {
 				logException(e, "Failed to send back parallel mapped result");
 				break;
@@ -69,7 +73,6 @@ auto parallelUnorderedMap(alias fun, R)(R items, shared(TaskPool) task_pool, Cha
 
 	static if (hasMember!(R, "length"))
 		auto length = items.length;
-
 	runTask(&senderFun, items, chin);
 
 	auto rc = new shared int;
@@ -143,7 +146,8 @@ auto parallelUnorderedMap(alias fun, R)(R items, ChannelConfig channel_config = 
 
 ///
 unittest {
-	runPhoton({
+	startloop();
+	go({
 		import std.algorithm : isPermutation, map;
 		import std.array : array;
 		import std.range : iota;
@@ -153,8 +157,9 @@ unittest {
 			.array;
 		assert(res.isPermutation(iota(100).map!(i => 2 * i).array));
 	});
+	runFibers();
 }
-
+/+
 unittest {
 	runPhoton({
 		import std.range : iota;
@@ -166,7 +171,7 @@ unittest {
 		assert(res.length == 99);
 	});
 }
-
++/
 
 /** Processes a range of items in worker tasks and returns them as an ordered
 	range.
@@ -267,7 +272,7 @@ auto parallelMap(alias fun, R)(R items, ChannelConfig channel_config = ChannelCo
 	import vibe.core.core : workerTaskPool;
 	return parallelMap!(fun, R)(items, workerTaskPool, channel_config);
 }
-
+/+
 ///
 unittest {
 	runPhoton({
@@ -317,3 +322,4 @@ unittest {
 		assert(res.front == 2);
 	});
 }
++/

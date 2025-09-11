@@ -608,7 +608,7 @@ private void runMutexUnitTests(M)()
 			assert(m.impl.locked);
 			t1.joinUninterruptible();
 			assert(!t1.running && t2.running);
-			try sleep(1.usecs); // give t2 a chance to take the lock
+			try yield(); // give t2 a chance to take the lock
 			catch (Exception e) assert(false, e.msg);
 			assert(m.impl.locked);
 			t2.joinUninterruptible();
@@ -691,10 +691,10 @@ final class TaskCondition : core.sync.condition.Condition {
 
 unittest {
 	new TaskCondition(new StdMutex);
-	//new TaskCondition(new TaskMutex);
+	new TaskCondition(new TaskMutex);
 	static if (__VERSION__ >= 2093) {
 		new shared TaskCondition(new shared StdMutex);
-		//new shared TaskCondition(new shared TaskMutex);
+		new shared TaskCondition(new shared TaskMutex);
 	}
 }
 

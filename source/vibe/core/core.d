@@ -266,35 +266,85 @@ void setIdleHandler(bool delegate() @safe nothrow del)
 */
 Task runTask(ARGS...)(void delegate(ARGS) @safe nothrow task, auto ref ARGS args)
 {
-	return go(() => task(args));
+	return runTask_Internal(task, args);
 }
 ///
 Task runTask(ARGS...)(void delegate(ARGS) @system nothrow task, auto ref ARGS args)
 @system {
-	return go(() => task(args));
+	return runTask_Internal(task, args);
 }
 /// ditto
 Task runTask(CALLABLE, ARGS...)(CALLABLE task, auto ref ARGS args)
 	if (!is(CALLABLE : void delegate(ARGS)) && isNothrowCallable!(CALLABLE, ARGS))
 {
-	return go(() => task(args));
+	return runTask_Internal(task, args);
 }
 /// ditto
 Task runTask(ARGS...)(TaskSettings settings, void delegate(ARGS) @safe nothrow task, auto ref ARGS args)
 {
-	return go(() => task(args));
+	return runTask_Internal(task, args);
 }
 /// ditto
 Task runTask(ARGS...)(TaskSettings settings, void delegate(ARGS) @system nothrow task, auto ref ARGS args)
 @system {
-	return go(() => task(args));
+	return runTask_Internal(task, args);
 }
 /// ditto
 Task runTask(CALLABLE, ARGS...)(TaskSettings settings, CALLABLE task, auto ref ARGS args)
 	if (!is(CALLABLE : void delegate(ARGS)) && isNothrowCallable!(CALLABLE, ARGS))
 {
-	return go(() => task(args));
+	return runTask_Internal(task, args);
 }
+
+package Task runTask_Internal(CALLABLE, ARGS...)(CALLABLE task, auto ref ARGS args) @trusted {
+	import std.traits;
+	import core.stdc.stdlib, core.stdc.string;
+	alias Params = ParameterTypeTuple!CALLABLE;
+	struct Tup(T...) {
+		T args;
+	}
+	static if (Params.length == 0) {
+		return go(() => task());
+	}
+	else {
+		Tup!Params* tup = cast(Tup!Params*)malloc(Tup!Params.sizeof);
+		Tup!Params init;
+		memcpy(tup, &init, init.sizeof);
+		foreach (i, ref el; args) {
+			static if (needsMove!(typeof(el)))
+				tup.args[i] = move(el);
+			else
+				*cast(Unqual!(typeof(el))*)&tup.args[i] = *cast(Unqual!(typeof(el))*)&el;
+		}
+		string code() {
+			string buf = "task(";
+			static foreach (i; 0..ARGS.length) {
+				if (i != 0)
+					buf ~= ",";
+				static if (!isCopyable!(ARGS[i])) {
+					buf ~= format("move(tup.args[%d])", i);
+				} else {
+					buf ~= format("tup.args[%d]", i);
+				}
+			}
+			buf ~= ");";
+			return buf;
+		}
+		return go(() {
+			try {
+				mixin(code());
+			} finally {
+				foreach (ref el; tup.args) {
+					static if (hasElaborateDestructor!(typeof(el))) {
+						el.__dtor();
+					}
+				}
+				free(tup);
+			}
+		});
+	}
+}
+
 /+
 unittest { // test proportional priority scheduling
 	auto tm = setTimer(1000.msecs, { assert(false, "Test timeout"); });
@@ -345,7 +395,6 @@ unittest { // ensure task.running is true directly after runTask
 	});
 }
 
-/+
 unittest {
 	startloop();
 	import core.atomic : atomicOp;
@@ -379,7 +428,7 @@ unittest {
 		assert(*s.rc == 1);
 	});
 	runFibers();
-}+/
+}
 
 
 /**
@@ -391,27 +440,27 @@ unittest {
 void runWorkerTask(FT, ARGS...)(FT func, auto ref ARGS args)
 	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 {
-	go(() => func(args));
+	runTask_Internal(func, args);
 }
 /// ditto
 void runWorkerTask(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
 	if (isNothrowMethod!(shared(T), method, ARGS))
 {
 	auto func = &__traits(getMember, object, __traits(identifier, method));
-	go(() => func(args));
+	runTask_Internal(func, args);
 }
 /// ditto
 void runWorkerTask(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
 	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 {
-	go(() => func(args));
+	runTask_Internal(func, args);
 }
 /// ditto
 void runWorkerTask(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
 	if (isNothrowMethod!(shared(T), method, ARGS))
 {
 	auto func = &__traits(getMember, object, __traits(identifier, method));
-	go(() => func(args));
+	runTask_Internal(func, args);
 }
 
 
@@ -427,23 +476,7 @@ void runWorkerTask(alias method, T, ARGS...)(TaskSettings settings, shared(T) ob
 Task runWorkerTaskH(FT, ARGS...)(FT func, auto ref ARGS args)
 	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 {
-	return go((){
-		string code() {
-			string buf = "func(";
-			static foreach (i; 0..ARGS.length) {
-				if (i != 0)
-					buf ~= ",";
-				static if (!isCopyable!(ARGS[i])) {
-					buf ~= format("move(args[%d])", i);
-				} else {
-					buf ~= format("args[%d]", i);
-				}
-			}
-			buf ~= ");";
-			return buf;
-		}
-		mixin(code());
-	});
+	return runTask_Internal(func, args);
 }
 /// ditto
 Task runWorkerTaskH(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)

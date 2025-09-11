@@ -26,7 +26,7 @@ shared final class TaskPool {
 			thread_count = The number of worker threads to create
 			thread_name_prefix = Optional prefix to use for thread names
 	*/
-	this(size_t thread_count = schedulerThreads(), string thread_name_prefix = "vibe")
+	this(size_t thread_count = logicalProcessorCount(), string thread_name_prefix = "vibe")
 	@safe nothrow {
 		m_threadCount = thread_count;
 	}
@@ -51,7 +51,7 @@ shared final class TaskPool {
 		if (isFunctionPointer!FT)
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
-		go(() => func(args));
+		vibe.core.core.runTask(func, args);
 	}
 	/// ditto
 	void runTask(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
@@ -59,14 +59,14 @@ shared final class TaskPool {
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 		auto func = &__traits(getMember, object, __traits(identifier, method));
-		go(() => func(args));
+		vibe.core.core.runTask(func, args);
 	}
 	/// ditto
 	void runTask(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
 		if (isFunctionPointer!FT)
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
-		go(() => func(args));
+		vibe.core.core.runTask(func, args);
 	}
 	/// ditto
 	void runTask(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
@@ -74,7 +74,7 @@ shared final class TaskPool {
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 		auto func = &__traits(getMember, object, __traits(identifier, method));
-		go(() => func(args));
+		vibe.core.core.runTask(func, args);
 	}
 
 	/** Runs a new asynchronous task in a worker thread, returning the task handle.
@@ -159,7 +159,7 @@ shared final class TaskPool {
 			~ "	ch = Channel!Task.init;"
 			~ "	func("~argvals()~");"
 			~ "}");
-		go(() => taskFun(ch, func, args));
+		runTask(&taskFun, ch, func, args);
 
 		Task ret;
 		if (ch.empty())
@@ -214,9 +214,7 @@ shared final class TaskPool {
 
 	private void runTaskDist_unsafe(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args) {
 		foreach (_; 0..this.threadCount) {
-			import std.stdio;
-			debug writeln(args);
-			go(() => func(args));
+			runTask(func, args);
 		}
 	}
 
