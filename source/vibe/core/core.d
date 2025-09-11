@@ -863,7 +863,7 @@ void yield()
 unittest {
 	runPhoton({
 		size_t ti;
-		auto t = runTask({
+		auto t = goOnSameThread({
 			for (ti = 0; ti < 10; ti++)
 				try yield();
 				catch (Exception e) assert(false, e.msg);

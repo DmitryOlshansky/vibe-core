@@ -15,7 +15,7 @@ import vibe.core.log;
 import std.range : ElementType, isInputRange;
 import std.traits : hasMember;
 
-version(unittest) import photon : startloop, go, runFibers;
+version(unittest) import photon : runPhoton;
 
 /** Processes a range of items in worker tasks and returns them as an unordered
 	range.
@@ -146,8 +146,7 @@ auto parallelUnorderedMap(alias fun, R)(R items, ChannelConfig channel_config = 
 
 ///
 unittest {
-	startloop();
-	go({
+	runPhoton({
 		import std.algorithm : isPermutation, map;
 		import std.array : array;
 		import std.range : iota;
@@ -157,9 +156,8 @@ unittest {
 			.array;
 		assert(res.isPermutation(iota(100).map!(i => 2 * i).array));
 	});
-	runFibers();
 }
-/+
+
 unittest {
 	runPhoton({
 		import std.range : iota;
@@ -171,7 +169,7 @@ unittest {
 		assert(res.length == 99);
 	});
 }
-+/
+
 
 /** Processes a range of items in worker tasks and returns them as an ordered
 	range.
@@ -272,7 +270,7 @@ auto parallelMap(alias fun, R)(R items, ChannelConfig channel_config = ChannelCo
 	import vibe.core.core : workerTaskPool;
 	return parallelMap!(fun, R)(items, workerTaskPool, channel_config);
 }
-/+
+
 ///
 unittest {
 	runPhoton({
@@ -322,4 +320,3 @@ unittest {
 		assert(res.front == 2);
 	});
 }
-+/
