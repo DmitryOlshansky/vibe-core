@@ -12,7 +12,9 @@ import vibe.core.log;
 import core.thread;
 import vibe.core.sync;
 import vibe.internal.freelistref;
-/+
+
+import photon;
+
 /**
 	Generic connection pool class.
 
@@ -178,61 +180,65 @@ final class ConnectionPool(Connection)
 
 ///
 unittest {
-	class Connection {
-		void write() {}
-	}
+	runPhoton({
+		class Connection {
+			void write() {}
+		}
 
-	auto pool = new ConnectionPool!Connection({
-		return new Connection; // perform the connection here
+		auto pool = new ConnectionPool!Connection({
+			return new Connection; // perform the connection here
+		});
+
+		// create and lock a first connection
+		auto c1 = pool.lockConnection();
+		c1.write();
+
+		// create and lock a second connection
+		auto c2 = pool.lockConnection();
+		c2.write();
+
+		// writing to c1 will still write to the first connection
+		c1.write();
+
+		// free up the reference to the first connection, so that it can be reused
+		destroy(c1);
+
+		// locking a new connection will reuse the first connection now instead of creating a new one
+		auto c3 = pool.lockConnection();
+		c3.write();
 	});
-
-	// create and lock a first connection
-	auto c1 = pool.lockConnection();
-	c1.write();
-
-	// create and lock a second connection
-	auto c2 = pool.lockConnection();
-	c2.write();
-
-	// writing to c1 will still write to the first connection
-	c1.write();
-
-	// free up the reference to the first connection, so that it can be reused
-	destroy(c1);
-
-	// locking a new connection will reuse the first connection now instead of creating a new one
-	auto c3 = pool.lockConnection();
-	c3.write();
 }
-
+/+
 unittest { // issue vibe-d#2109
 	import vibe.core.net : TCPConnection, connectTCP;
 	new ConnectionPool!TCPConnection({ return connectTCP("127.0.0.1", 8080); });
 }
-
++/
 unittest { // removeUnused
-	class Connection {}
+	runPhoton({
+		class Connection {}
 
-	auto pool = new ConnectionPool!Connection({
-		return new Connection; // perform the connection here
+		auto pool = new ConnectionPool!Connection({
+			return new Connection; // perform the connection here
+		});
+
+		auto c1 = pool.lockConnection();
+		auto c1i = c1.__conn;
+
+		auto c2 = pool.lockConnection();
+		auto c2i = c2.__conn;
+
+
+		assert(pool.m_connections == [c1i, c2i]);
+
+		c2 = LockedConnection!Connection.init;
+		pool.removeUnused((c) { assert(c is c2i); });
+		assert(pool.m_connections == [c1i]);
+
+		c1 = LockedConnection!Connection.init;
+		pool.removeUnused((c) { assert(c is c1i); });
+		assert(pool.m_connections == []);
 	});
-
-	auto c1 = pool.lockConnection();
-	auto c1i = c1.__conn;
-
-	auto c2 = pool.lockConnection();
-	auto c2i = c2.__conn;
-
-
-	assert(pool.m_connections == [c1i, c2i]);
-
-	c2 = LockedConnection!Connection.init;
-	pool.removeUnused((c) { assert(c is c2i); });
-	assert(pool.m_connections == [c1i]);
-
-	c1 = LockedConnection!Connection.init;
-	pool.removeUnused((c) { assert(c is c1i); });
-	assert(pool.m_connections == []);
 }
 
 
@@ -293,30 +299,31 @@ struct LockedConnection(Connection) {
 
 ///
 unittest {
-	int id = 0;
-	class Connection {
-		public int id;
-	}
+	runPhoton({
+		int id = 0;
+		class Connection {
+			public int id;
+		}
 
-	auto pool = new ConnectionPool!Connection({
-		auto conn = new Connection(); // perform the connection here
-		conn.id = id++;
-		return conn;
+		auto pool = new ConnectionPool!Connection({
+			auto conn = new Connection(); // perform the connection here
+			conn.id = id++;
+			return conn;
+		});
+
+		// create and lock a first connection
+		auto c1 = pool.lockConnection();
+		assert(c1.id == 0);
+		pool.remove(c1);
+		destroy(c1);
+
+		auto c2 = pool.lockConnection();
+		assert(c2.id == 1); // assert that we got a new connection
+		pool.remove(c2);
+		pool.add(c2);
+		destroy(c2);
+
+		auto c3 = pool.lockConnection();
+		assert(c3.id == 1); // should get the same connection back
 	});
-
-	// create and lock a first connection
-	auto c1 = pool.lockConnection();
-	assert(c1.id == 0);
-	pool.remove(c1);
-	destroy(c1);
-
-	auto c2 = pool.lockConnection();
-	assert(c2.id == 1); // assert that we got a new connection
-	pool.remove(c2);
-	pool.add(c2);
-	destroy(c2);
-
-	auto c3 = pool.lockConnection();
-	assert(c3.id == 1); // should get the same connection back
 }
-+/

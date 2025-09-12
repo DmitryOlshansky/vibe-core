@@ -227,8 +227,8 @@ alias LocalTaskSemaphore = TaskSemaphore;
 final class TaskSemaphore
 {
 private:
-	int _maxLocks;
-	shared int locks;
+	long _maxLocks;
+	shared long locks;
 	shared Semaphore sem;
 public:
 @safe nothrow:
@@ -241,22 +241,22 @@ public:
 	}
 
 	/// Maximum number of concurrent locks
-	@property void maxLocks(uint max_locks) { _maxLocks = cast(int)max_locks; }
+	@property void maxLocks(uint max_locks) { _maxLocks = cast(long)max_locks; }
 	/// Maximum number of concurrent locks
-	@property void maxLocks(uint max_locks) shared { _maxLocks = cast(int)max_locks; }
+	@property void maxLocks(uint max_locks) shared { _maxLocks = cast(long)max_locks; }
 	/// ditto
-	@property uint maxLocks() const { return _maxLocks; }
+	@property uint maxLocks() const { return cast(uint)_maxLocks; }
 	/// ditto
-	@property uint maxLocks() const shared { return _maxLocks; }
+	@property uint maxLocks() const shared { return cast(uint)_maxLocks; }
 
 	/// Number of concurrent locks still available
 	@property uint available() const { 
-		return locks;
+		return cast(uint)locks;
 	}
 
 	/// Number of concurrent locks still available
 	@property uint available() const shared { 
-		return locks;
+		return cast(uint)locks;
 	}
 
 	/** Try to acquire a lock.
