@@ -6,7 +6,7 @@
 	Authors: Sönke Ludwig
 */
 module vibe.core.file;
-/+
+
 import vibe.core.log;
 import vibe.core.path;
 import vibe.core.stream;
@@ -16,6 +16,8 @@ import core.stdc.stdio;
 import core.sys.posix.unistd;
 import core.sys.posix.fcntl;
 import core.sys.posix.sys.stat;
+import core.stdc.errno;
+import core.stdc.string;
 import core.time;
 import std.conv : octal;
 import std.datetime;
@@ -26,9 +28,11 @@ import std.string;
 import std.typecons : Flag, No;
 import taggedalgebraic.taggedunion;
 
+import photon;
 
 version(Posix){
 	private extern(C) int mkstemps(char* templ, int suffixlen);
+	private extern(C) char* strerror(int errnum);
 }
 
 @safe:
@@ -37,24 +41,33 @@ version(Posix){
 /**
 	Opens a file stream with the specified mode.
 */
-FileStream openFile(NativePath path, FileMode mode = FileMode.read)
+FileStream openFile(NativePath path, FileMode mode = FileMode.read) @trusted
 {
-	static if (is(FileOpenCallback)) {
-		auto res = asyncAwaitUninterruptible!(FileOpenCallback,
-			cb => eventDriver.files.open(path.toNativeString(), cast(FileOpenMode)mode, cb)
-		);
-
-		if (res[0] == FileFD.invalid) {
-			import std.conv : to;
-			throw new Exception("Failed to open file '"~path.toNativeString~"': "~res[1].to!string);
-		}
-
-		return FileStream(res[0], path, mode);
-	} else {
-		auto fil = eventDriver.files.open(path.toNativeString(), cast(FileOpenMode)mode);
-		enforce(fil != FileFD.invalid, "Failed to open file '"~path.toNativeString~"'");
-		return FileStream(fil, path, mode);
+	int flags = 0;
+	int amode = 0;
+	final switch (mode) {
+		case FileMode.read:
+			flags = O_RDONLY;
+			break;
+		case FileMode.readWrite:
+			flags = O_RDWR;
+			break;
+		case FileMode.create:
+			flags = O_RDWR | O_CREAT | O_EXCL;
+			amode = octal!644;
+			break;
+		case FileMode.createTrunc:
+			flags = O_RDWR | O_CREAT | O_TRUNC;
+			amode = octal!644;
+			break;
+		case FileMode.append:
+			flags = O_WRONLY | O_CREAT | O_APPEND;
+			break;
 	}
+	auto fil = .open(path.toNativeString().toStringz, flags, amode);
+	auto s = strerror(errno);
+	enforce(fil != -1, "Failed to open file '"~path.toNativeString~"'"~cast(string)s[0..strlen(s)]);
+	return FileStream(fil, path, mode);
 }
 /// ditto
 FileStream openFile(string path, FileMode mode = FileMode.read)
@@ -189,7 +202,7 @@ FileStream createTempFile(string suffix = null)
 		assert(suffix.length <= int.max);
 		auto fd = () @trusted { return mkstemps(templ.ptr, cast(int)suffix.length); } ();
 		enforce(fd >= 0, "Failed to create temporary file.");
-		auto efd = eventDriver.files.adopt(fd);
+		auto efd = fd;
 		return FileStream(efd, NativePath(templ[0 .. $-1].idup), FileMode.createTrunc);
 	}
 }
@@ -309,7 +322,6 @@ void removeFile(string path)
 		}
 		return null;
 	}, path);
-
 	if (fail.length) throw new Exception(fail);
 }
 
@@ -454,7 +466,7 @@ void createDirectory(string path, Flag!"recursive" recursive = No.recursive)
 
 	if (fail) throw new Exception(fail);
 }
-
+/+
 /** Enumerates all files in the specified directory.
 
 	Note that unless an explicit `mode` is given, `DirectoryMode.shallow` is the
@@ -571,7 +583,7 @@ DirectoryWatcher watchDirectory(string path, bool recursive = true)
 {
 	return watchDirectory(NativePath(path), recursive);
 }
-
++/
 /**
 	Returns the current working directory.
 */
@@ -629,19 +641,16 @@ template _createFileModeValue() {
 */
 enum FileMode {
 	/// The file is opened read-only.
-	read = FileOpenMode.read,
+	read,
 	/// The file is opened for read-write random access.
-	readWrite = FileOpenMode.readWrite,
+	readWrite,
 	/** Create the file and open read/write, fails if already existing
-
-		Note that eventcore 0.9.24 or up is required, older versions will fall
-		back to `FileMode.read`.
 	*/
-	create = _createFileModeValue!(),
+	create,
 	/// The file is truncated if it exists or created otherwise and then opened for read-write access.
-	createTrunc = FileOpenMode.createTrunc,
+	createTrunc,
 	/// The file is opened for appending data to it and created if it does not exist.
-	append = FileOpenMode.append
+	append
 }
 
 enum DirectoryListMode {
@@ -655,6 +664,13 @@ enum DirectoryListMode {
 	recursiveDirectories = recursive | shallowDirectories,
 }
 
+size_t getFileSize(int fd) nothrow @trusted {
+	stat_t st;
+	if (fstat(fd, &st) < 0) {
+		assert(false, "stat failed");
+	}
+	return st.st_size;
+}
 
 /**
 	Accesses the contents of a file as a stream.
@@ -667,25 +683,24 @@ struct FileStream {
 		ulong size;
 		FileMode mode;
 		ulong ptr;
-		shared(NativeEventDriver) driver;
+		uint refCount = 1;
 	}
 
 	private {
-		FileFD m_fd;
+		int m_fd;
 		CTX* m_ctx;
 	}
 
 scope:
 
-	private this(FileFD fd, NativePath path, FileMode mode)
+	private this(int fd, NativePath path, FileMode mode)
 	nothrow {
-		assert(fd != FileFD.invalid, "Constructing FileStream from invalid file descriptor.");
+		assert(fd != -1, "Constructing FileStream from invalid file descriptor.");
 		m_fd = fd;
 		m_ctx = new CTX; // TODO: use FD custom storage
 		m_ctx.path = path;
 		m_ctx.mode = mode;
-		m_ctx.size = eventDriver.files.getSize(fd);
-		m_ctx.driver = () @trusted { return cast(shared)eventDriver; } ();
+		m_ctx.size = getFileSize(fd);
 
 		if (mode == FileMode.append)
 			m_ctx.ptr = m_ctx.size;
@@ -693,54 +708,34 @@ scope:
 
 	this(this)
 	nothrow {
-		if (m_fd != FileFD.invalid)
-			eventDriver.files.addRef(m_fd);
+		if (m_fd != -1) {
+			m_ctx.refCount++;
+		}
 	}
 
 	~this()
 	nothrow {
 		import core.memory : GC;
-		import core.stdc.stdio : fprintf, stderr;
+		import core.stdc.stdio : fprintf, stderr;	
 
-		static if (is(typeof(&eventDriver.files.isUnique))) {
-			if (this.isOpen) {
-				if (GC.inFinalizer) {
-					() @trusted {
-						auto path = m_ctx.path.toString();
-						fprintf(stderr, "Warning: Leaking open FileStream handle because the instance was leaked to the GC (%.*s)\n",
-							cast(int)path.length, path.ptr);
-					} ();
-					m_fd = FileFD.invalid;
-				} else if (m_ctx.driver is (() @trusted => cast(shared)eventDriver)()) {
-					if (eventDriver.files.isUnique(m_fd)) {
-						try close();
-						catch (Exception e) logException(e, "Closing unclosed FileStream during destruction failed");
-					}
-				} else logWarn("Destroying FileStream that is still open in a foreign thread (leaked to GC?). This may lead to crashes.");
-			}
+		if (m_fd != -1) {
+			if (--m_ctx.refCount == 0)
+				.close(m_fd);
 		}
-
-		if (m_fd != FileFD.invalid)
-			releaseHandle!"files"(m_fd, m_ctx.driver);
 	}
 
-	@property int fd() const nothrow { return cast(int)m_fd; }
+	@property int fd() const nothrow { return m_fd; }
 
 	/// The path of the file.
 	@property NativePath path() const nothrow { return m_ctx.path; }
 
 	/// Determines if the file stream is still open
-	@property bool isOpen() const nothrow { return m_fd != FileFD.invalid; }
+	@property bool isOpen() const nothrow { return m_fd != -1; }
 	@property ulong size() const nothrow { return m_ctx.size; }
 	@property bool readable() const nothrow { return m_ctx.mode != FileMode.append; }
 	@property bool writable() const nothrow { return m_ctx.mode != FileMode.read; }
 
-	bool opCast(T)() if (is (T == bool)) { return m_fd != FileFD.invalid; }
-
-	void takeOwnershipOfFD()
-	{
-		assert(false, "TODO!");
-	}
+	bool opCast(T)() if (is (T == bool)) { return m_fd != -1; }
 
 	void seek(ulong offset)
 	{
@@ -754,27 +749,21 @@ scope:
 	{
 		enforce(m_ctx.mode != FileMode.append, "File opened for appending, not random access. Cannot truncate.");
 
-		auto res = asyncAwaitUninterruptible!(FileIOCallback,
-			cb => eventDriver.files.truncate(m_fd, size, cb)
-		);
-		enforce(res[1] == IOStatus.ok, "Failed to resize file.");
+		auto res = ftruncate(m_fd, size);
+		enforce(res != -1, "Failed to resize file.");
 		m_ctx.size = size;
 	}
 
 	/// Closes the file handle.
 	void close()
 	{
-		if (m_fd == FileFD.invalid) return;
-		if (!eventDriver.files.isValid(m_fd)) return;
+		if (m_fd == -1) return;
 
-		auto res = asyncAwaitUninterruptible!(FileCloseCallback,
-			cb => eventDriver.files.close(m_fd, cb)
-		);
-		releaseHandle!"files"(m_fd, m_ctx.driver);
-		m_fd = FileFD.invalid;
+		int resp = .close(m_fd);
+		m_fd = -1;
 		m_ctx = null;
 
-		if (res[1] != CloseStatus.ok)
+		if (resp != 0)
 			throw new Exception("Failed to close file");
 	}
 
@@ -791,17 +780,12 @@ scope:
 		return null;
 	}
 
-	size_t read(scope ubyte[] dst, IOMode mode)
+	size_t read(scope ubyte[] dst, IOMode mode) @trusted
 	{
-		// NOTE: cancelRead is currently not behaving as specified and cannot
-		//       be relied upon. For this reason, we MUST use the uninterruptible
-		//       version of asyncAwait here!
-		auto res = asyncAwaitUninterruptible!(FileIOCallback,
-			cb => eventDriver.files.read(m_fd, m_ctx.ptr, () @trusted { return dst; } (), mode, cb)
-		);
-		m_ctx.ptr += res[2];
-		enforce(res[1] == IOStatus.ok, "Failed to read data from disk.");
-		return res[2];
+		auto res = .pread(m_fd, dst.ptr, dst.length, m_ctx.ptr);
+		if (res < 0) throw new Exception("Failed to read data from disk.");
+		m_ctx.ptr += res;
+		return res;
 	}
 
 	void read(scope ubyte[] dst)
@@ -810,18 +794,13 @@ scope:
 		assert(ret == dst.length, "File.read returned less data than requested for IOMode.all.");
 	}
 
-	size_t write(scope const(ubyte)[] bytes, IOMode mode)
+	size_t write(scope const(ubyte)[] bytes, IOMode mode) @trusted
 	{
-		// NOTE: cancelWrite is currently not behaving as specified and cannot
-		//       be relied upon. For this reason, we MUST use the uninterruptible
-		//       version of asyncAwait here!
-		auto res = asyncAwaitUninterruptible!(FileIOCallback,
-			cb => eventDriver.files.write(m_fd, m_ctx.ptr, () @trusted { return bytes; } (), mode, cb)
-		);
-		m_ctx.ptr += res[2];
+		auto res = .pwrite(m_fd, bytes.ptr, bytes.length, m_ctx.ptr);
+		if (res < 0) throw new Exception("Failed to write data to disk.");
+		m_ctx.ptr += res;
 		if (m_ctx.ptr > m_ctx.size) m_ctx.size = m_ctx.ptr;
-		enforce(res[1] == IOStatus.ok, "Failed to write data to disk.");
-		return res[2];
+		return res;
 	}
 
 	void write(scope const(ubyte)[] bytes)
@@ -852,7 +831,7 @@ scope:
 }
 
 mixin validateClosableRandomAccessStream!FileStream;
-
+/+
 
 /**
 	Interface for directory watcher implementations.
@@ -980,7 +959,7 @@ struct DirectoryChange {
 	/// Path of the file/directory that was changed
 	NativePath path;
 }
-
++/
 
 private FileInfo makeFileInfo(DirEntry ent)
 @trusted nothrow {
@@ -1017,57 +996,59 @@ private FileInfo makeFileInfo(DirEntry ent)
 }
 
 version (Windows) {} else unittest {
-	void test(string name_in, string name_out, bool hidden) {
-		auto de = DirEntry(name_in);
-		assert(makeFileInfo(de).hidden == hidden);
-		assert(makeFileInfo(de).name == name_out);
-	}
+	runPhoton({
+		void test(string name_in, string name_out, bool hidden) {
+			auto de = DirEntry(name_in);
+			assert(makeFileInfo(de).hidden == hidden);
+			assert(makeFileInfo(de).name == name_out);
+		}
 
-	void testCreate(string name_in, string name_out, bool hidden)
-	{
-		if (name_in.endsWith("/"))
-			createDirectory(name_in);
-		else writeFileUTF8(NativePath(name_in), name_in);
-		scope (exit) removeFile(name_in);
-		test(name_in, name_out, hidden);
-	}
+		void testCreate(string name_in, string name_out, bool hidden)
+		{
+			if (name_in.endsWith("/"))
+				createDirectory(name_in);
+			else writeFileUTF8(NativePath(name_in), name_in);
+			scope (exit) removeFile(name_in);
+			test(name_in, name_out, hidden);
+		}
 
-	test(".", ".", false);
-	test("..", "..", false);
-	testCreate(".test_foo", ".test_foo", true);
-	test("./", ".", false);
-	testCreate(".test_foo/", ".test_foo", true);
-	test("/", "", false);
+		test(".", ".", false);
+		test("..", "..", false);
+		testCreate(".test_foo", ".test_foo", true);
+		test("./", ".", false);
+		testCreate(".test_foo/", ".test_foo", true);
+		test("/", "", false);
+	});
 }
 
 unittest {
-	auto name = "toAppend.txt";
-	scope(exit) removeFile(name);
+	runPhoton({
+		auto name = "toAppend.txt";
+		scope(exit) removeFile(name);
+		{
+			auto handle = openFile(name, FileMode.createTrunc);
+			handle.write("create,");
+			assert(handle.tell() == "create,".length);
+			handle.close();
+		}
+		{
+			auto handle = openFile(name, FileMode.append);
+			handle.write(" then append");
+			assert(handle.tell() == "create, then append".length);
+			handle.close();
+		}
 
-	{
-		auto handle = openFile(name, FileMode.createTrunc);
-		handle.write("create,");
-		assert(handle.tell() == "create,".length);
-		handle.close();
-	}
-	{
-		auto handle = openFile(name, FileMode.append);
-		handle.write(" then append");
-		assert(handle.tell() == "create, then append".length);
-		handle.close();
-	}
-
-	assert(readFile(name) == "create, then append");
+		assert(readFile(name) == "create, then append");
+	
+	});
 }
 
 
-private auto performInIOWorker(C, ARGS...)(C callable, auto ref ARGS args)
+private auto performInIOWorker(C, ARGS...)(C callable, auto ref ARGS args) @trusted
 {
-	import vibe.core.concurrency : performInWorker;
-	import vibe.core.core : ioWorkerTaskPool;
-	return performInWorker(ioWorkerTaskPool, callable, args);
+	return offload(() => callable(args));
 }
-
+/+
 private void performListDirectory(ListDirectoryRequest req)
 @trusted nothrow {
 	scope (exit) req.channel.close();

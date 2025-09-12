@@ -22,7 +22,12 @@ import core.time;
 import std.algorithm;
 import std.conv;
 
-/+
+enum IOMode {
+	immediate, /// Process only as much as possible without waiting
+	once,      /// Process as much as possible with a single call
+	all        /// Process the full buffer
+}
+
 /** Pipes an InputStream directly into this OutputStream.
 
 	The number of bytes written is either the whole input stream when
@@ -582,4 +587,3 @@ mixin template validateTruncatableStream(T) { import vibe.internal.traits : vali
 	See_Also: `isClosableRandomAccessStream`
 */
 mixin template validateClosableRandomAccessStream(T) { import vibe.internal.traits : validateInterfaceConformance; mixin validateInterfaceConformance!(T, .ClosableRandomAccessStream); }
-+/

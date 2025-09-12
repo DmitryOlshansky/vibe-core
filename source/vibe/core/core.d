@@ -818,14 +818,12 @@ public void setupWorkerThreads(uint num = 0)
 */
 @property shared(TaskPool) workerTaskPool()
 @safe nothrow {
-	setupWorkerThreads();
 	return st_workerPool;
 }
 
 
 package @property shared(TaskPool) ioWorkerTaskPool()
 @safe nothrow {
-	setupWorkerThreads();
 	return st_ioWorkerPool;
 }
 +/
@@ -987,9 +985,11 @@ unittest {
 }
 
 shared TaskPool workerTaskPool;
+shared TaskPool ioWorkerTaskPool;
 
 shared static this() {
 	workerTaskPool = new TaskPool;
+	ioWorkerTaskPool = new TaskPool;
 }
 
 /** Suspends the execution of the calling task an an uninterruptible manner.

@@ -18,6 +18,8 @@ import std.typecons;
 
 import photon;
 
+alias Task = photon.Task;
+
 /** Settings to control the behavior of newly started tasks.
 */
 struct TaskSettings {
