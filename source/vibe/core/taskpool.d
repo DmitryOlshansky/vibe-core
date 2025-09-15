@@ -181,7 +181,7 @@ shared final class TaskPool {
 		`threadCount`.
 	*/
 	void runTaskDist(FT, ARGS...)(FT func, auto ref ARGS args)
-		if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
+		if (isFunctionPointer!FT/* && isNothrowCallable!(FT, ARGS)*/)
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 		runTaskDist_unsafe(TaskSettings.init, func, args);

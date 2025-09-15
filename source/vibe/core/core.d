@@ -69,7 +69,7 @@ version (Windows)
 /**************************************************************************************************/
 /* Public functions                                                                               */
 /**************************************************************************************************/
-/+
+
 /**
 	Performs final initialization and runs the event loop.
 
@@ -167,7 +167,7 @@ unittest {
 		return runEventLoop();
 	}
 }
-+/
+
 
 /**
 	Starts the vibe.d event loop for the calling thread.
@@ -336,7 +336,7 @@ package Task runTask_Internal(CALLABLE, ARGS...)(CALLABLE task, auto ref ARGS ar
 			} finally {
 				foreach (ref el; tup.args) {
 					static if (hasElaborateDestructor!(typeof(el))) {
-						el.__dtor();
+						destroy(el);
 					}
 				}
 				free(tup);
@@ -482,21 +482,55 @@ Task runWorkerTaskH(FT, ARGS...)(FT func, auto ref ARGS args)
 Task runWorkerTaskH(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
 	if (isNothrowMethod!(shared(T), method, ARGS))
 {
-	return go(() => method(object, args));
+	auto func = &__traits(getMember, object, __traits(identifier, method));
+	return runTask_Internal(func, args);
 }
 /// ditto
 Task runWorkerTaskH(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
 	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 {
-	return go(() => func(args));
+	return runTask_Internal(func, args);
 }
 /// ditto
 Task runWorkerTaskH(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
 	if (isNothrowMethod!(shared(T), method, ARGS))
 {
-	return go(() => func(args));
+	return runTask_Internal(func, args);
 }
-/+
+
+/** Runs a new asynchronous task in all worker threads concurrently.
+
+	This function is mainly useful for long-living tasks that distribute their
+	work across all CPU cores. Only function pointers with weakly isolated
+	arguments are allowed to be able to guarantee thread-safety.
+
+	The number of tasks started is guaranteed to be equal to
+	`threadCount`.
+*/
+void runWorkerTaskDist(FT, ARGS...)(FT func, auto ref ARGS args)
+	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
+{
+	workerTaskPool.runTaskDist(func, args);
+}
+/// ditto
+void runWorkerTaskDist(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
+	if (isNothrowMethod!(shared(T), method, ARGS))
+{
+	workerTaskPool.runTaskDist!method(object, args);
+}
+/// ditto
+void runWorkerTaskDist(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
+	if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
+{
+	workerTaskPool.runTaskDist(func, args);
+}
+/// ditto
+void runWorkerTaskDist(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
+	if (isNothrowMethod!(shared(T), method, ARGS))
+{
+	workerTaskPool.runTaskDist!method(object, args);
+}
+
 /// Running a worker task using a function
 unittest {
 	static void workerFunc(int param)
@@ -512,7 +546,7 @@ unittest {
 		runWorkerTaskDist(&workerFunc, cast(ubyte)42); // implicit conversion #719
 	}
 }
-+/
+
 /// Running a worker task using a class method
 unittest {
 	static class Test {
@@ -534,7 +568,7 @@ unittest {
 
 /// Running a worker task using a function and communicating with it
 unittest {
-	/+
+	
 	static void workerFunc(Task caller)
 	nothrow {
 		int counter = 10;
@@ -558,12 +592,12 @@ unittest {
 
 	static void work719(int) nothrow {}
 	static void test719() { runWorkerTaskH(&work719, cast(ubyte)42); }
-	+/
+	
 }
 
 /// Running a worker task using a class method and communicating with it
 unittest {
-	/+
+	
 	static class Test {
 		void workerMethod(Task caller)
 		shared nothrow {
@@ -595,7 +629,7 @@ unittest {
 		auto cls = new shared Class719;
 		runWorkerTaskH!(Class719.work)(cls, cast(ubyte)42);
 	}
-	+/
+	
 }
 
 unittest { // run and join local task from outside of a task
