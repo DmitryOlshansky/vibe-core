@@ -118,18 +118,17 @@ TCPListener[] listenTCP(ushort port, TCPConnectionDelegate connection_callback, 
 	return ret;
 }
 /// ditto
-TCPListener listenTCP(ushort port, TCPConnectionDelegate connection_callback, string address, TCPListenOptions options = TCPListenOptions.defaults)
+TCPListener listenTCP(ushort port, TCPConnectionDelegate connection_callback, string address, TCPListenOptions options = TCPListenOptions.defaults) @trusted
 {
 	auto addr = resolveHost(address);
 	addr.port = port;
-	SocketOption sopts;
-	if (options & TCPListenOptions.reuseAddress)
-		sopts |= SocketOption.REUSEADDR;
-	if (options & TCPListenOptions.reusePort)
-		sopts |= SocketOption.REUSEPORT;
+	SocketOption s;
 	Socket server = new TcpSocket();
-    server.setOption(SocketOptionLevel.SOCKET, sopts, true);
-    server.bind(new InternetAddress(addr.toAddressString(), addr.port));
+	if (options & TCPListenOptions.reuseAddress)
+		server.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
+	if (options & TCPListenOptions.reusePort)
+		server.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEPORT, true);
+    bind(server.handle, addr.sockAddr, addr.sockAddrLen);
     server.listen(1000);
 	go({
 		for (;;) {
@@ -700,17 +699,19 @@ struct TCPConnection {
 		return waitForDataEx(timeout) == WaitForDataStatus.dataAvailable;
 	}
 
-	WaitForDataStatus waitForDataEx(Duration timeout = Duration.max)
+	WaitForDataStatus waitForDataEx(Duration timeout = Duration.max) @trusted
 	{
 		if (!m_context) return WaitForDataStatus.noMoreData;
 		if (m_context.readBuffer.length > 0) return WaitForDataStatus.dataAvailable;
-		auto mode = timeout <= 0.seconds ? IOMode.immediate : IOMode.once;
-
-		bool cancelled;
 		size_t nbytes;
 
-		
-		m_socket.receive(m_context.readBuffer.peekDst());
+		pollfd fd;
+		fd.fd = m_socket.handle;
+		fd.events = POLLIN;
+		if (poll(&fd, 1, timeout == Duration.max ? -1 : cast(int)timeout.total!"msecs") == 0) {
+			return WaitForDataStatus.timeout;
+		}
+		nbytes = m_socket.receive(m_context.readBuffer.peekDst());
 		
 		logTrace("Socket %s, read %s", m_socket, nbytes);
 
