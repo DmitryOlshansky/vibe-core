@@ -7,17 +7,23 @@
 */
 module vibe.core.net;
 
+import core.stdc.string;
+import core.sys.posix.poll;
 import std.exception : enforce;
 import std.format : format;
 import std.functional : toDelegate;
-import std.socket : AddressFamily, UnknownAddress;
+import std.socket;
 import vibe.core.log;
+import vibe.core.core;
 import vibe.core.stream;
 import vibe.internal.async;
 import core.time : Duration;
 
+import photon;
+
+extern(C) const(char)* strerror(int errc);
+
 @safe:
-/+
 
 /**
 	Resolves the given host name/IP address string.
@@ -77,23 +83,13 @@ NetworkAddress resolveHost(string host, ushort family, bool use_dns = true, Dura
 	enforce(use_dns, "Malformed IP address string.");
 	NetworkAddress res;
 	bool success = false;
-	alias waitable = Waitable!(DNSLookupCallback,
-		cb => eventDriver.dns.lookupHost(host, cb),
-		(cb, id) => eventDriver.dns.cancelLookup(id),
-		(DNSLookupID, DNSStatus status, scope RefAddress[] addrs) {
-			if (status == DNSStatus.ok) {
-				foreach (addr; addrs) {
-					if (family != AddressFamily.UNSPEC && addr.addressFamily != family) continue;
-					try res = NetworkAddress(addr);
-					catch (Exception e) { logDiagnostic("Failed to store address from DNS lookup: %s", e.msg); }
-					success = true;
-					break;
-				}
-			}
-		}
-	);
-
-	asyncAwaitAny!(true, waitable)(timeout);
+	foreach (addr; getAddress(host)) {
+		if (family != AddressFamily.UNSPEC && addr.addressFamily != family) continue;
+		try res = NetworkAddress(addr);
+		catch (Exception e) { logDiagnostic("Failed to store address from DNS lookup: %s", e.msg); }
+		success = true;
+		break;
+	}
 
 	enforce(success, "Failed to lookup host '"~host~"'.");
 	return res;
@@ -126,30 +122,23 @@ TCPListener listenTCP(ushort port, TCPConnectionDelegate connection_callback, st
 {
 	auto addr = resolveHost(address);
 	addr.port = port;
-	StreamListenOptions sopts = StreamListenOptions.defaults;
+	SocketOption sopts;
 	if (options & TCPListenOptions.reuseAddress)
-		sopts |= StreamListenOptions.reuseAddress;
-	else
-		sopts &= ~StreamListenOptions.reuseAddress;
+		sopts |= SocketOption.REUSEADDR;
 	if (options & TCPListenOptions.reusePort)
-		sopts |= StreamListenOptions.reusePort;
-	else
-		sopts &= ~StreamListenOptions.reusePort;
-	static if (is(typeof(StreamListenOptions.ipTransparent))) {
-		if (options & TCPListenOptions.ipTransparent)
-			sopts |= StreamListenOptions.ipTransparent;
-		else
-			sopts &= ~StreamListenOptions.ipTransparent;
-	}
-	scope addrc = new RefAddress(addr.sockAddr, addr.sockAddrLen);
-	auto sock = eventDriver.sockets.listenStream(addrc, sopts,
-		(StreamListenSocketFD ls, StreamSocketFD s, scope RefAddress addr) @safe nothrow {
-			import vibe.core.core : runTask;
+		sopts |= SocketOption.REUSEPORT;
+	Socket server = new TcpSocket();
+    server.setOption(SocketOptionLevel.SOCKET, sopts, true);
+    server.bind(new InternetAddress(addr.toAddressString(), addr.port));
+    server.listen(1000);
+	go({
+		for (;;) {
+			auto s = server.accept();
 			auto conn = TCPConnection(s, addr);
 			runTask(connection_callback, conn);
-		});
-	enforce(sock != StreamListenSocketFD.invalid, "Failed to listen on "~addr.toString());
-	return TCPListener(sock);
+		}
+	});
+	return TCPListener(server);
 }
 
 /// Compatibility overload - use an `@safe nothrow` callback instead.
@@ -220,7 +209,6 @@ TCPConnection connectTCP(NetworkAddress addr, NetworkAddress bind_address = anyA
 	Duration timeout = Duration.max)
 {
 	import std.conv : to;
-
 	if (bind_address.family == AddressFamily.UNSPEC) {
 		bind_address.family = addr.family;
 		if (bind_address.family == AddressFamily.INET) bind_address.sockAddrInet4.sin_addr.s_addr = 0;
@@ -231,54 +219,22 @@ TCPConnection connectTCP(NetworkAddress addr, NetworkAddress bind_address = anyA
 	enforce(addr.family == bind_address.family, "Destination address and bind address have different address families.");
 
 	return () @trusted { // scope
-		scope uaddr = new RefAddress(addr.sockAddr, addr.sockAddrLen);
-		scope baddr = new RefAddress(bind_address.sockAddr, bind_address.sockAddrLen);
-
-		bool cancelled;
-		StreamSocketFD sock;
-		ConnectStatus status;
-
-		alias waiter = Waitable!(ConnectCallback,
-			cb => eventDriver.sockets.connectStream(uaddr, baddr, cb),
-			(cb, sock_fd) {
-				cancelled = true;
-				if (sock_fd != SocketFD.invalid) {
-					eventDriver.sockets.cancelConnectStream(sock_fd);
-					eventDriver.sockets.releaseRef(sock_fd);
-				}
-			},
-			(fd, st) { sock = fd; status = st; }
-		);
-
-		asyncAwaitAny!(true, waiter)(timeout);
-
-		enforce(!cancelled, "Failed to connect to " ~ addr.toString() ~
-			": timeout");
-
-		if (status != ConnectStatus.connected) {
-			if (sock != SocketFD.invalid)
-				eventDriver.sockets.releaseRef(sock);
-
-			enforce(false, "Failed to connect to "~addr.toString()~": "~status.to!string);
-			assert(false);
-		}
-
-		return TCPConnection(sock, uaddr);
+		Socket sock = new Socket(bind_address.address.addressFamily, SocketType.STREAM);
+		sock.bind(bind_address.address);
+		sock.connect(addr.address);
+		return TCPConnection(sock, addr);
 	} ();
 }
 
 
 /** Creates a streaming socket connection from an existing stream socket.
 */
-TCPConnection createStreamConnection(StreamSocketFD socket)
+TCPConnection createStreamConnection(Socket socket)
 {
-	scope storage = new UnknownAddress;
-	scope sockaddr = new RefAddress(storage.name, storage.nameLen);
-	eventDriver.sockets.getRemoteAddress(socket, sockaddr);
-	return TCPConnection(socket, sockaddr);
+	return TCPConnection(socket, NetworkAddress(socket.remoteAddress));
 }
 
-
+/+
 /**
 	Creates a bound UDP socket suitable for sending and receiving packets.
 */
@@ -294,7 +250,7 @@ UDPConnection listenUDP(ushort port, string bind_address = "0.0.0.0",
 	addr.port = port;
 	return UDPConnection(addr, options);
 }
-
++/
 NetworkAddress anyAddress()
 {
 	NetworkAddress ret;
@@ -323,6 +279,7 @@ struct NetworkAddress {
 
 	@safe:
 
+	private Address address;
 	private union {
 		sockaddr addr;
 		version (Posix) sockaddr_un addr_unix;
@@ -336,6 +293,7 @@ struct NetworkAddress {
 	this(scope const(Address) addr)
 		@trusted
 	{
+		address = cast()addr;
 		assert(addr !is null);
 		switch (addr.addressFamily) {
 			default: throw new Exception("Unsupported address family.");
@@ -503,7 +461,7 @@ struct NetworkAddress {
 	}
 
 	unittest {
-		void test(string ip, string expected = null) {
+		void test(string ip, string expected = null) @trusted {
 			if(expected is null) expected = ip;
 			auto w_dns = () @trusted { return resolveHost(ip, AF_UNSPEC, true); } ();
 			auto no_dns = () @trusted { return resolveHost(ip, AF_UNSPEC, false); } ();
@@ -639,66 +597,77 @@ struct TCPConnection {
 		bool keepAlive = false;
 		Duration readTimeout = Duration.max;
 		string remoteAddressString;
-		shared(NativeEventDriver) driver;
+		int refCount = 1;
 	}
 
 	private {
-		StreamSocketFD m_socket;
+		Socket m_socket;
 		Context* m_context;
 	}
 
-	private this(StreamSocketFD socket, scope RefAddress remote_address)
+	private this(Socket socket, scope NetworkAddress remote_address)
 	nothrow {
 		import std.exception : enforce;
-
 		m_socket = socket;
-		m_context = () @trusted { return &eventDriver.sockets.userData!Context(socket); } ();
+		m_context = new Context;
+		m_context.remoteAddressString = remote_address.toAddressString;
 		m_context.readBuffer.capacity = 4096;
-		m_context.driver = () @trusted { return cast(shared)eventDriver; } ();
 	}
 
 	this(this)
 	scope nothrow {
-		if (m_socket != StreamSocketFD.invalid)
-			eventDriver.sockets.addRef(m_socket);
+		if (m_socket !is null)
+			m_context.refCount++;
 	}
 
 	~this()
 	scope nothrow {
-		if (m_socket != StreamSocketFD.invalid && m_context && m_context.driver)
-			.releaseHandle!"sockets"(m_socket, m_context.driver);
+		if (m_socket !is null && m_context) {
+			if (--m_context.refCount == 0) close();
+		}
 	}
 
-	@property int fd() const nothrow { return cast(int)m_socket; }
+	@property int fd() const nothrow { return cast(int)m_socket.handle; }
 
-	bool opCast(T)() const nothrow if (is(T == bool)) { return m_socket != StreamSocketFD.invalid; }
+	bool opCast(T)() const nothrow if (is(T == bool)) { return m_socket !is null; }
 
-	@property void tcpNoDelay(bool enabled) nothrow { eventDriver.sockets.setTCPNoDelay(m_socket, enabled); m_context.tcpNoDelay = enabled; }
-	@property bool tcpNoDelay() const nothrow { return m_context.tcpNoDelay; }
-	@property void keepAlive(bool enabled) nothrow { eventDriver.sockets.setKeepAlive(m_socket, enabled); m_context.keepAlive = enabled; }
+	@property void tcpNoDelay(bool enabled) nothrow { 
+		int32_t opt = enabled;
+		try {
+			m_socket.setOption(SocketOptionLevel.SOCKET, SocketOption.TCP_NODELAY, opt);
+		} catch (Exception t) { assert(false, "Failed to set tcp nodelay option"); }
+	}
+	@property bool tcpNoDelay() const nothrow @trusted {
+		int32_t result;
+		try {
+			(cast()m_socket).getOption(SocketOptionLevel.SOCKET, SocketOption.TCP_NODELAY, result);
+		} catch (Exception t) { assert(false, "Failed to get tcp nodelay option"); }
+		return result != 0; 
+	}
+	@property void keepAlive(bool enabled) nothrow {
+		try {
+			m_socket.setKeepAlive(60, 5);
+		} catch(Exception t){ assert(false, "Failed to set keep alive"); }
+		m_context.keepAlive = enabled;
+	}
 	@property bool keepAlive() const nothrow { return m_context.keepAlive; }
 	@property void readTimeout(Duration duration) { m_context.readTimeout = duration; }
 	@property Duration readTimeout() const nothrow { return m_context.readTimeout; }
 	@property string peerAddress() const nothrow { return this.remoteAddress.toString(); }
-	@property NetworkAddress localAddress() const nothrow {
-		NetworkAddress naddr;
-		scope addr = new RefAddress(naddr.sockAddr, naddr.sockAddrMaxLen);
-		if (!eventDriver.sockets.getLocalAddress(m_socket, addr))
-			logWarn("Failed to get local address for TCP connection");
-		return naddr;
+	@property NetworkAddress localAddress() const nothrow @trusted {
+		try {
+			return NetworkAddress((cast()m_socket).localAddress);
+		} catch(Exception t) { assert(false, "Failed to get local address"); }
 	}
-	@property NetworkAddress remoteAddress() const nothrow {
-		NetworkAddress naddr;
-		scope addr = new RefAddress(naddr.sockAddr, naddr.sockAddrMaxLen);
-		if (!eventDriver.sockets.getRemoteAddress(m_socket, addr))
-			logWarn("Failed to get remote address for TCP connection");
-		return naddr;
+	@property NetworkAddress remoteAddress() const nothrow @trusted {
+		try {
+			return NetworkAddress((cast()m_socket).remoteAddress);
+		} catch(Exception t) { assert(false, "Failed to get remote address"); }
 	}
 	@property bool connected()
 	const nothrow {
-		if (m_socket == StreamSocketFD.invalid) return false;
-		auto s = eventDriver.sockets.getConnectionState(m_socket);
-		return s >= ConnectionState.connected && s < ConnectionState.activeClose;
+		if (m_socket is null) return false;
+		return true; // TODO: connection status, seriously?
 	}
 	@property bool empty() { return leastSize == 0; }
 
@@ -718,10 +687,10 @@ struct TCPConnection {
 	void close()
 	nothrow {
 		//logInfo("close %s", cast(int)m_fd);
-		if (m_socket != StreamSocketFD.invalid) {
-			eventDriver.sockets.shutdown(m_socket, true, true);
-			eventDriver.sockets.releaseRef(m_socket);
-			m_socket = StreamSocketFD.invalid;
+		if (m_socket !is null) {
+			m_socket.shutdown(SocketShutdown.BOTH);
+			m_socket.close();
+			m_socket = null;
 			m_context = null;
 		}
 	}
@@ -733,52 +702,20 @@ struct TCPConnection {
 
 	WaitForDataStatus waitForDataEx(Duration timeout = Duration.max)
 	{
-		mixin(tracer);
 		if (!m_context) return WaitForDataStatus.noMoreData;
 		if (m_context.readBuffer.length > 0) return WaitForDataStatus.dataAvailable;
 		auto mode = timeout <= 0.seconds ? IOMode.immediate : IOMode.once;
 
 		bool cancelled;
-		IOStatus status;
 		size_t nbytes;
 
-		// ensure the socket stays alive in case close() gets called concurrently
-		auto sock = m_socket;
-		eventDriver.sockets.addRef(m_socket);
-		scope (exit) eventDriver.sockets.releaseRef(sock);
-
-		alias waiter = Waitable!(IOCallback,
-			cb => eventDriver.sockets.read(m_socket, m_context.readBuffer.peekDst(), mode, cb),
-			(cb) { cancelled = true; eventDriver.sockets.cancelRead(m_socket); },
-			(sock, st, nb) {
-				if (m_socket == StreamSocketFD.invalid) {
-					cancelled = true;
-					return;
-				}
-				assert(sock == m_socket); status = st; nbytes = nb;
-			}
-		);
-
-		asyncAwaitAny!(true, waiter)(timeout);
-
-		if (!m_context) return WaitForDataStatus.noMoreData;
-		// NOTE: for IOMode.immediate, no actual timeout occurrs, but the read
-		//       fails immediately with wouldBlock
-		if (cancelled || status == IOStatus.wouldBlock)
-			return WaitForDataStatus.timeout;
-
-		logTrace("Socket %s, read %s bytes: %s", m_socket, nbytes, status);
+		
+		m_socket.receive(m_context.readBuffer.peekDst());
+		
+		logTrace("Socket %s, read %s", m_socket, nbytes);
 
 		assert(m_context.readBuffer.length == 0);
 		m_context.readBuffer.putN(nbytes);
-		switch (status) {
-			default:
-				logDebug("Error status when waiting for data: %s", status);
-				break;
-			case IOStatus.ok: break;
-			case IOStatus.wouldBlock: assert(mode == IOMode.immediate); break;
-			case IOStatus.disconnected: break;
-		}
 
 		return m_context.readBuffer.length > 0 ? WaitForDataStatus.dataAvailable : WaitForDataStatus.noMoreData;
 	}
@@ -807,67 +744,36 @@ struct TCPConnection {
 			and the callback will be invoked once the status can be
 			determined or the specified timeout is reached.
 	*/
-	WaitForDataAsyncStatus waitForDataAsync(CALLABLE)(CALLABLE read_ready_callback, Duration timeout = Duration.max)
+	WaitForDataAsyncStatus waitForDataAsync(CALLABLE)(CALLABLE read_ready_callback, Duration timeout = Duration.max) @trusted
 		if (is(typeof(() @safe { read_ready_callback(true); } ())))
 	{
-		mixin(tracer);
-		import vibe.core.core : Timer, setTimer;
-
-		if (!m_context)
-			return WaitForDataAsyncStatus.noMoreData;
-
-		if (m_context.readBuffer.length > 0)
+		pollfd fd;
+		fd.fd = m_socket.handle;
+		fd.events = POLLIN;
+		auto res = poll(&fd, 1, 0); // quick check
+		if (res > 0) {
+			auto nbytes = m_socket.receive(m_context.readBuffer.peekDst());
+			m_context.readBuffer.putN(nbytes);
 			return WaitForDataAsyncStatus.dataAvailable;
-
-		if (timeout <= 0.seconds) {
-			auto rs = waitForData(0.seconds);
-			return rs ? WaitForDataAsyncStatus.dataAvailable : WaitForDataAsyncStatus.noMoreData;
 		}
-
-		static final class WaitContext {
-			import std.algorithm.mutation : move;
-
-			CALLABLE callback;
-			TCPConnection connection;
-			Timer timer;
-
-			this(CALLABLE callback, TCPConnection connection, Duration timeout)
-			{
-				this.callback = callback;
-				this.connection = connection;
-				if (timeout < Duration.max)
-					this.timer = setTimer(timeout, &onTimeout);
-			}
-
-			void onTimeout()
-			{
-				eventDriver.sockets.cancelRead(connection.m_socket);
-				invoke(false);
-			}
-
-			void onData(StreamSocketFD, IOStatus st, size_t nb)
-			{
-				if (timer) timer.stop();
-				assert(connection.m_context.readBuffer.length == 0);
-				connection.m_context.readBuffer.putN(nb);
-				invoke(connection.m_context.readBuffer.length > 0);
-			}
-
-			void invoke(bool status)
-			{
-				auto cb = move(callback);
-				connection = TCPConnection.init;
-				timer = Timer.init;
-				cb(status);
-			}
+		else {
+			runTask((CALLABLE callback){
+				try {
+					pollfd fd;
+					fd.fd = m_socket.handle;
+					fd.events = POLLIN;
+					auto res = poll(&fd, 1, cast(int)timeout.total!"msecs");
+					if (res == 0)  {
+						callback(false);
+					}
+					else {
+						auto nbytes = m_socket.receive(m_context.readBuffer.peekDst());
+						m_context.readBuffer.putN(nbytes);
+						callback(true);
+					}
+				} catch (Exception e) { assert(false, e.msg); }
+			}, read_ready_callback);
 		}
-
-		// FIXME: make this work without a heap allocation!
-		auto context = new WaitContext(read_ready_callback, this, timeout);
-
-		eventDriver.sockets.read(m_socket, m_context.readBuffer.peekDst(),
-			IOMode.once, &context.onData);
-
 		return WaitForDataAsyncStatus.waiting;
 	}
 
@@ -921,28 +827,17 @@ struct TCPConnection {
 
 	void read(scope ubyte[] dst) { auto r = read(dst, IOMode.all); assert(r == dst.length); }
 
-	size_t write(scope const(ubyte)[] bytes, IOMode mode)
+	size_t write(scope const(ubyte)[] bytes, IOMode mode) @trusted
 	{
 		mixin(tracer);
 		if (bytes.length == 0) return 0;
 
-		auto res = asyncAwait!(IOCallback,
-			cb => eventDriver.sockets.write(m_socket, () @trusted { return bytes; } (), mode, cb),
-			cb => eventDriver.sockets.cancelWrite(m_socket));
-
-		switch (res[1]) {
-			default:
-				throw new Exception("Error writing data to socket.");
-			case IOStatus.ok:
-				assert(mode != IOMode.all || res[2] == bytes.length);
-				break;
-			case IOStatus.disconnected:
-				if (mode == IOMode.all && res[2] != bytes.length)
-					throw new Exception("Connection closed while writing data.");
-				break;
+		auto res = m_socket.send(bytes);
+		if (res == Socket.ERROR) {
+			auto p = strerror(errno);
+			throw new Exception(cast(string)p[0..strlen(p)]);
 		}
-
-		return res[2];
+		return res;
 	}
 
 	void write(scope const(ubyte)[] bytes) { auto r = write(bytes, IOMode.all); assert(r == bytes.length); }
@@ -1049,51 +944,39 @@ struct TCPListener {
 	//        the previous behavior of keeping the socket alive when the listener isn't stored. At the same time,
 	//        stopListening() needs to keep working.
 	private {
-		static struct Context {
-			shared(NativeEventDriver) driver;
-		}
-
-		StreamListenSocketFD m_socket;
-		Context* m_context;
+		Socket m_socket;
 	}
 
-	this(StreamListenSocketFD socket)
+	this(Socket socket)
 	{
 		m_socket = socket;
-		m_context = () @trusted { return &eventDriver.sockets.userData!Context(m_socket); } ();
-		m_context.driver = () @trusted { return cast(shared)eventDriver; } ();
 	}
 
-	bool opCast(T)() const nothrow if (is(T == bool)) { return m_socket != StreamListenSocketFD.invalid; }
+	bool opCast(T)() const nothrow if (is(T == bool)) { return m_socket !is null; }
 
 	/// The local address at which TCP connections are accepted.
 	@property NetworkAddress bindAddress()
 	{
-		NetworkAddress ret;
-		scope ra = new RefAddress(ret.sockAddr, ret.sockAddrMaxLen);
-		enforce(eventDriver.sockets.getLocalAddress(m_socket, ra),
-			"Failed to query bind address of listening socket.");
-		return ret;
+		return NetworkAddress(m_socket.localAddress);;
 	}
 
 	/// Stops listening and closes the socket.
 	void stopListening()
 	{
-		if (m_socket != StreamListenSocketFD.invalid) {
-			releaseHandle!"sockets"(m_socket, m_context.driver);
-			m_socket = StreamListenSocketFD.invalid;
+		if (m_socket !is null) {
+			m_socket.close();
+			m_socket = null;
 		}
 	}
 }
 
-
+/+
 /**
 	Represents a bound and possibly 'connected' UDP socket.
 */
 struct UDPConnection {
 	static struct Context {
 		bool canBroadcast;
-		shared(NativeEventDriver) driver;
 	}
 
 	private {
@@ -1277,7 +1160,7 @@ struct UDPConnection {
 		return buf[0 .. nbytes];
 	}
 }
-
++/
 
 /**
 	Flags to control the behavior of listenTCP.
@@ -1377,4 +1260,3 @@ unittest {
 	assert(!isMaybeIPAddress("12.com"));
 	assert(!isMaybeIPAddress("1.1.1.t12"));
 }
-+/

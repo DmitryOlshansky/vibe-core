@@ -118,7 +118,7 @@ nothrow {
 	}
 }
 
-
+@trusted:
 /**
 	Logs a message.
 
