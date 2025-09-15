@@ -687,7 +687,7 @@ struct FileStream {
 	}
 
 	private {
-		int m_fd;
+		int m_fd = -1;
 		CTX* m_ctx;
 	}
 
