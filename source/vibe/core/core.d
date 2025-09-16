@@ -189,7 +189,7 @@ unittest {
 */
 int runEventLoop()
 @safe {
-	runFibers();
+	runScheduler();
 	return 0;
 }
 
@@ -396,7 +396,7 @@ unittest { // ensure task.running is true directly after runTask
 }
 
 unittest {
-	startloop();
+	initPhoton();
 	import core.atomic : atomicOp;
 
 	static struct S {
@@ -427,7 +427,7 @@ unittest {
 		}, s).joinUninterruptible();
 		assert(*s.rc == 1);
 	});
-	runFibers();
+	runScheduler();
 }
 
 

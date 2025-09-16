@@ -256,7 +256,7 @@ shared final class TaskPool {
 }
 
 unittest { // #138 - immutable arguments
-	startloop();
+	initPhoton();
 	auto tp = new shared TaskPool;
 	struct S { int[] x; }
 	auto s = immutable(S)([1, 2]);
@@ -265,5 +265,5 @@ unittest { // #138 - immutable arguments
 		.joinUninterruptible();
 	});
 	tp.terminate();
-	runFibers();
+	runScheduler();
 }

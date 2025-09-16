@@ -315,7 +315,7 @@ public:
 }
 
 unittest {
-	startloop();
+	initPhoton();
 	import vibe.core.core : runTask, sleep;
 
 	void test(S)(S sem)
@@ -358,7 +358,7 @@ unittest {
 
 	//test(createTaskSemaphore(2));
 	//test(createSharedTaskSemaphore(2));
-	runFibers();
+	runScheduler();
 }
 
 
@@ -404,7 +404,7 @@ final class TaskMutex : core.sync.mutex.Mutex, Lockable {
 }
 
 unittest {
-	startloop();
+	initPhoton();
 	go({
 		auto mutex = new TaskMutex;
 
@@ -437,7 +437,7 @@ unittest {
 			assert(mutex.impl.locked);
 		}
 	});
-	runFibers();
+	runScheduler();
 }
 /+
 unittest { // test deferred throwing
@@ -526,7 +526,7 @@ unittest {
 }
 
 @safe unittest {
-	startloop();
+	initPhoton();
 	go({
 		import vibe.core.core : runTask;
 
@@ -545,13 +545,13 @@ unittest {
 			m.unlock();
 		}).joinUninterruptible();
 	});
-	runFibers();
+	runScheduler();
 }
 
 
 private void runMutexUnitTests(M)()
 {
-	startloop();
+	initPhoton();
 	go({
 		import vibe.core.core;
 
@@ -617,7 +617,7 @@ private void runMutexUnitTests(M)()
 		}).join;
 		assert(!m.impl.locked);
 	});
-	runFibers();
+	runScheduler();
 }
 
 
@@ -703,7 +703,7 @@ unittest {
 	sure that the final condition is reached.
 */
 unittest {
-	startloop();
+	initPhoton();
 	go({
 		import vibe.core.core;
 		import vibe.core.log;
@@ -747,7 +747,7 @@ unittest {
 			}
 		}
 	});
-	runFibers();
+	runScheduler();
 }
 
 /** A manually triggered single threaded cross-task event.
@@ -875,7 +875,7 @@ public:
 }
 
 unittest {
-	startloop();
+	initPhoton();
 	import vibe.core.core : exitEventLoop, runEventLoop, runTask, sleep;
 
 	auto e = createManualEvent();
@@ -890,11 +890,11 @@ unittest {
 		assert(!w1.running && !w2.running);
 		exitEventLoop();
 	});
-	runFibers();
+	runScheduler();
 }
 /+
 unittest { // ensure that cancelled waiters are properly handled and that a FIFO order is implemented
-	startloop();
+	initPhoton();
 	import vibe.core.core : exitEventLoop, runEventLoop, runTask, sleep;
 
 	LocalManualEvent l = createManualEvent();
@@ -918,11 +918,11 @@ unittest { // ensure that cancelled waiters are properly handled and that a FIFO
 	runTask({
 		l.emit();
 	});
-	runFibers();
+	runScheduler();
 }
 +/
 unittest { // ensure that LocalManualEvent behaves correctly after being copied
-	startloop();
+	initPhoton();
 	import vibe.core.core : exitEventLoop, runEventLoop, runTask, sleep;
 
 	LocalManualEvent l = createManualEvent();
@@ -936,7 +936,7 @@ unittest { // ensure that LocalManualEvent behaves correctly after being copied
 		assert(l.waitUninterruptible(1.seconds, l.emitCount));
 		exitEventLoop();
 	});
-	runFibers();
+	runScheduler();
 }
 
 private struct ManualEventImpl {
@@ -1031,7 +1031,7 @@ private struct ManualEventImpl {
 }
 
 unittest {
-	startloop();
+	initPhoton();
 	import vibe.core.core : exitEventLoop, runEventLoop, runTask, runWorkerTaskH, sleep;
 
 	auto e = createSharedManualEvent();
@@ -1047,7 +1047,7 @@ unittest {
 		assert(!w1.running && !w2.running);
 		exitEventLoop();
 	});
-	runFibers();
+	runScheduler();
 }
 /+
 unittest {
@@ -1056,7 +1056,7 @@ unittest {
 	import core.time : msecs, usecs;
 	import std.concurrency : send, receiveOnly;
 	import std.random : uniform;
-	startloop();
+	initPhoton();
 	go({
 		auto tpool = new shared TaskPool(4);
 		scope (exit) tpool.terminate();
@@ -1111,7 +1111,7 @@ unittest {
 			foreach (t; tasks) t.joinUninterruptible();
 		}).join();
 	});
-	runFibers();
+	runScheduler();
 }
 +/
 
@@ -1127,7 +1127,7 @@ shared(Monitor!(T, M)) createMonitor(T, M)(M mutex)
 
 ///
 unittest {
-	startloop();
+	initPhoton();
 	go({
 		import core.thread : Thread;
 		import std.algorithm.iteration : sum;
@@ -1159,7 +1159,7 @@ unittest {
 			assert(i == sum(litms[0 .. idx]) + 1);
 		}
 	});
-	runFibers();
+	runScheduler();
 }
 
 

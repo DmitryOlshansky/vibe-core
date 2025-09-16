@@ -13,7 +13,7 @@ import vibe.internal.array : FixedRingBuffer;
 import std.algorithm.mutation : move, swap;
 import std.exception : enforce;
 
-import photon : startloop, runFibers, go;
+import photon : initPhoton, runScheduler, go;
 
 // multiple producers allowed, multiple consumers allowed - Q: should this be restricted to allow higher performance? maybe configurable?
 // currently always buffered - TODO: implement blocking non-buffered mode
@@ -368,7 +368,7 @@ private final class ChannelImpl(T, size_t buffer_size) {
 }
 
 deprecated @safe unittest { // test basic operation and non-copyable struct compatiblity
-	startloop();
+	initPhoton();
 	go({
 		import std.exception : assertThrown;
 
@@ -390,11 +390,11 @@ deprecated @safe unittest { // test basic operation and non-copyable struct comp
 		assert(ch.empty);
 		assertThrown(ch.consumeOne());
 	});
-	runFibers();
+	runScheduler();
 }
 
 @safe unittest { // test basic operation and non-copyable struct compatiblity
-	startloop();
+	initPhoton();
 	go({
 		static struct S {
 			int i;
@@ -419,11 +419,11 @@ deprecated @safe unittest { // test basic operation and non-copyable struct comp
 		assert(ch.tryConsumeOne(v) && v.i == 2);
 		assert(!ch.tryConsumeOne(v));
 	});
-	runFibers();
+	runScheduler();
 }
 
 deprecated @safe unittest { // test basic operation and non-copyable struct compatiblity
-	startloop();
+	initPhoton();
 	static struct S {
 		int i;
 		@disable this(this);
@@ -449,7 +449,7 @@ deprecated @safe unittest { // test basic operation and non-copyable struct comp
 }
 
 deprecated @safe unittest { // make sure shared(Channel!T) can also be used
-	startloop();
+	initPhoton();
 	shared ch = createChannel!int;
 	ch.put(1);
 	assert(!ch.empty);
@@ -459,7 +459,7 @@ deprecated @safe unittest { // make sure shared(Channel!T) can also be used
 }
 
 @safe unittest { // make sure shared(Channel!T) can also be used
-	startloop();
+	initPhoton();
 	shared ch = createChannel!int;
 	ch.put(1);
 	int v;
@@ -469,7 +469,7 @@ deprecated @safe unittest { // make sure shared(Channel!T) can also be used
 }
 
 @safe unittest { // ensure nothrow'ness for throwing struct
-	startloop();
+	initPhoton();
 	static struct S {
 		this(this) { throw new Exception("meh!"); }
 	}
@@ -490,7 +490,7 @@ deprecated @safe unittest { // make sure shared(Channel!T) can also be used
 }
 
 deprecated @safe unittest { // ensure nothrow'ness for throwing struct
-	startloop();
+	initPhoton();
 	static struct S {
 		this(this) { throw new Exception("meh!"); }
 	}
@@ -511,7 +511,7 @@ deprecated @safe unittest { // ensure nothrow'ness for throwing struct
 }
 
 unittest {
-	startloop();
+	initPhoton();
 	go({
 		import std.traits : EnumMembers;
 		import vibe.core.core : runTask;
@@ -538,5 +538,5 @@ unittest {
 		foreach (m; EnumMembers!ChannelPriority)
 			test(m);
 	});
-	runFibers();
+	runScheduler();
 }
