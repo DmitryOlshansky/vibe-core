@@ -218,9 +218,9 @@ TCPConnection connectTCP(NetworkAddress addr, NetworkAddress bind_address = anyA
 	enforce(addr.family == bind_address.family, "Destination address and bind address have different address families.");
 
 	return () @trusted { // scope
-		Socket sock = new Socket(bind_address.address.addressFamily, SocketType.STREAM);
-		sock.bind(bind_address.address);
-		sock.connect(addr.address);
+		Socket sock = new Socket(cast(AddressFamily)addr.family, SocketType.STREAM);
+		bind(sock.handle, bind_address.sockAddr, bind_address.sockAddrLen);
+		connect(sock.handle, addr.sockAddr, addr.sockAddrLen);
 		return TCPConnection(sock, addr);
 	} ();
 }
