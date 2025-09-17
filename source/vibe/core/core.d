@@ -310,6 +310,7 @@ package Task runTask_Internal(CALLABLE, ARGS...)(CALLABLE task, auto ref ARGS ar
 		Tup!Params* tup = cast(Tup!Params*)malloc(Tup!Params.sizeof);
 		Tup!Params init;
 		memcpy(tup, &init, init.sizeof);
+		GC.addRange(tup, init.sizeof);
 		foreach (i, ref el; args) {
 			static if (needsMove!(typeof(el)))
 				tup.args[i] = move(el);
@@ -339,6 +340,7 @@ package Task runTask_Internal(CALLABLE, ARGS...)(CALLABLE task, auto ref ARGS ar
 						destroy(el);
 					}
 				}
+				GC.removeRange(tup);
 				free(tup);
 			}
 		});
@@ -1024,6 +1026,7 @@ shared TaskPool ioWorkerTaskPool;
 shared static this() {
 	workerTaskPool = new TaskPool;
 	ioWorkerTaskPool = new TaskPool;
+	initPhoton();
 }
 
 /** Suspends the execution of the calling task an an uninterruptible manner.

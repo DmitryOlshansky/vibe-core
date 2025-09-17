@@ -633,13 +633,13 @@ struct TCPConnection {
 	@property void tcpNoDelay(bool enabled) nothrow { 
 		int32_t opt = enabled;
 		try {
-			m_socket.setOption(SocketOptionLevel.SOCKET, SocketOption.TCP_NODELAY, opt);
-		} catch (Exception t) { assert(false, "Failed to set tcp nodelay option"); }
+			m_socket.setOption(SocketOptionLevel.TCP, SocketOption.TCP_NODELAY, opt);
+		} catch (Exception t) { assert(false, "Failed to set tcp nodelay option" ~ t.msg); }
 	}
 	@property bool tcpNoDelay() const nothrow @trusted {
 		int32_t result;
 		try {
-			(cast()m_socket).getOption(SocketOptionLevel.SOCKET, SocketOption.TCP_NODELAY, result);
+			(cast()m_socket).getOption(SocketOptionLevel.TCP, SocketOption.TCP_NODELAY, result);
 		} catch (Exception t) { assert(false, "Failed to get tcp nodelay option"); }
 		return result != 0; 
 	}
@@ -661,7 +661,7 @@ struct TCPConnection {
 	@property NetworkAddress remoteAddress() const nothrow @trusted {
 		try {
 			return NetworkAddress((cast()m_socket).remoteAddress);
-		} catch(Exception t) { assert(false, "Failed to get remote address"); }
+		} catch(Exception t) { assert(false, "Failed to get remote address" ~ t.msg); }
 	}
 	@property bool connected()
 	const nothrow {
@@ -703,7 +703,7 @@ struct TCPConnection {
 	{
 		if (!m_context) return WaitForDataStatus.noMoreData;
 		if (m_context.readBuffer.length > 0) return WaitForDataStatus.dataAvailable;
-		size_t nbytes;
+		ptrdiff_t nbytes;
 
 		pollfd fd;
 		fd.fd = m_socket.handle;
@@ -712,6 +712,9 @@ struct TCPConnection {
 			return WaitForDataStatus.timeout;
 		}
 		nbytes = m_socket.receive(m_context.readBuffer.peekDst());
+		if (nbytes <= 0) {
+			return WaitForDataStatus.noMoreData;
+		}
 		
 		logTrace("Socket %s, read %s", m_socket, nbytes);
 
