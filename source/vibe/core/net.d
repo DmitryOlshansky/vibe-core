@@ -835,13 +835,17 @@ struct TCPConnection {
 	{
 		mixin(tracer);
 		if (bytes.length == 0) return 0;
-
-		auto res = m_socket.send(bytes);
-		if (res == Socket.ERROR) {
-			auto p = strerror(errno);
-			throw new Exception(cast(string)p[0..strlen(p)]);
-		}
-		return res;
+		size_t written = 0;
+		do {
+			auto res = m_socket.send(bytes);
+			if (res == Socket.ERROR) {
+				auto p = strerror(errno);
+				throw new Exception(cast(string)p[0..strlen(p)]);
+			}
+			written += res;
+			bytes = bytes[res .. $];
+		} while (bytes.length > 0);
+		return written;
 	}
 
 	void write(scope const(ubyte)[] bytes) { auto r = write(bytes, IOMode.all); assert(r == bytes.length); }
