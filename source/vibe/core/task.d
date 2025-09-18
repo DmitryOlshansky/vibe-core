@@ -58,7 +58,6 @@ enum TaskSwitchPriority {
 }
 
 
-/+
 /**
 	Implements a task local storage variable.
 
@@ -96,89 +95,8 @@ enum TaskSwitchPriority {
 		}
 		---
 */
-struct TaskLocal(T)
-{
-	private {
-		size_t m_offset = size_t.max;
-		size_t m_id;
-		T m_initValue;
-		bool m_hasInitValue = false;
-	}
+alias TaskLocal = photon.TaskLocal;
 
-	this(T init_val) { m_initValue = init_val; m_hasInitValue = true; }
-
-	@disable this(this);
-
-	void opAssign(T value) { this.storage = value; }
-
-	@property ref T storage()
-	@safe {
-		import std.conv : emplace;
-
-		auto fiber = TaskFiber.getThis();
-
-		// lazily register in FLS storage
-		if (m_offset == size_t.max) {
-			static assert(T.alignof <= 8, "Unsupported alignment for type "~T.stringof);
-			assert(TaskFiber.ms_flsFill % 8 == 0, "Misaligned fiber local storage pool.");
-			m_offset = TaskFiber.ms_flsFill;
-			m_id = TaskFiber.ms_flsCounter++;
-
-
-			TaskFiber.ms_flsFill += T.sizeof;
-			while (TaskFiber.ms_flsFill % 8 != 0)
-				TaskFiber.ms_flsFill++;
-		}
-
-		// make sure the current fiber has enough FLS storage
-		if (fiber.m_fls.length < TaskFiber.ms_flsFill) {
-			fiber.m_fls.length = TaskFiber.ms_flsFill + 128;
-			() @trusted { fiber.m_flsInit.length = TaskFiber.ms_flsCounter + 64; } ();
-		}
-
-		// return (possibly default initialized) value
-		auto data = () @trusted { return fiber.m_fls.ptr[m_offset .. m_offset+T.sizeof]; } ();
-		if (!() @trusted { return fiber.m_flsInit[m_id]; } ()) {
-			() @trusted { fiber.m_flsInit[m_id] = true; } ();
-			import std.traits : hasElaborateDestructor, hasAliasing;
-			static if (hasElaborateDestructor!T || hasAliasing!T) {
-				void function(void[], size_t) destructor = (void[] fls, size_t offset){
-					static if (hasElaborateDestructor!T) {
-						auto obj = cast(T*)&fls[offset];
-						// call the destructor on the object if a custom one is known declared
-						obj.destroy();
-					}
-					else static if (hasAliasing!T) {
-						// zero the memory to avoid false pointers
-						foreach (size_t i; offset .. offset + T.sizeof) {
-							ubyte* u = cast(ubyte*)&fls[i];
-							*u = 0;
-						}
-					}
-				};
-				FLSInfo fls_info;
-				fls_info.fct = destructor;
-				fls_info.offset = m_offset;
-
-				// make sure flsInfo has enough space
-				if (TaskFiber.ms_flsInfo.length <= m_id)
-					TaskFiber.ms_flsInfo.length = m_id + 64;
-
-				TaskFiber.ms_flsInfo[m_id] = fls_info;
-			}
-
-			if (m_hasInitValue) {
-				static if (__traits(compiles, () @trusted { emplace!T(data, m_initValue); } ()))
-					() @trusted { emplace!T(data, m_initValue); } ();
-				else assert(false, "Cannot emplace initialization value for type "~T.stringof);
-			} else () @trusted { emplace!T(data); } ();
-		}
-		return *() @trusted { return cast(T*)data.ptr; } ();
-	}
-
-	alias storage this;
-}
-+/
 
 /** Exception that is thrown by Task.interrupt.
 */
