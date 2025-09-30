@@ -9,6 +9,7 @@ module vibe.core.net;
 
 import core.stdc.string;
 import core.sys.posix.poll;
+import core.stdc.inttypes;
 import std.exception : enforce;
 import std.format : format;
 import std.functional : toDelegate;
@@ -705,15 +706,26 @@ struct TCPConnection {
 		if (m_context.readBuffer.length > 0) return WaitForDataStatus.dataAvailable;
 		ptrdiff_t nbytes;
 
-		pollfd fd;
-		fd.fd = m_socket.handle;
-		fd.events = POLLIN;
-		if (poll(&fd, 1, timeout == Duration.max ? -1 : cast(int)timeout.total!"msecs") == 0) {
-			return WaitForDataStatus.timeout;
-		}
-		nbytes = m_socket.receive(m_context.readBuffer.peekDst());
-		if (nbytes <= 0) {
-			return WaitForDataStatus.noMoreData;
+		version(Posix) {
+			pollfd fd;
+			fd.fd = m_socket.handle;
+			fd.events = POLLIN;
+			if (poll(&fd, 1, timeout == Duration.max ? -1 : cast(int)timeout.total!"msecs") == 0) {
+				return WaitForDataStatus.timeout;
+			}
+			nbytes = m_socket.receive(m_context.readBuffer.peekDst());
+			if (nbytes <= 0) {
+				return WaitForDataStatus.noMoreData;
+			}
+		} else version(Windows) {
+			auto dest = m_context.readBuffer.peekDst();
+			nbytes = recvWithTimeout(m_socket.handle, dest.ptr, cast(int)dest.length, 0, timeout);
+			if (nbytes == -2) {
+				return WaitForDataStatus.timeout;
+			}
+			else if (nbytes <= 0) {
+				return WaitForDataStatus.noMoreData;
+			}
 		}
 		
 		logTrace("Socket %s, read %s", m_socket, nbytes);
@@ -751,34 +763,61 @@ struct TCPConnection {
 	WaitForDataAsyncStatus waitForDataAsync(CALLABLE)(CALLABLE read_ready_callback, Duration timeout = Duration.max) @trusted
 		if (is(typeof(() @safe { read_ready_callback(true); } ())))
 	{
-		pollfd fd;
-		fd.fd = m_socket.handle;
-		fd.events = POLLIN;
-		auto res = poll(&fd, 1, 0); // quick check
-		if (res > 0) {
-			auto nbytes = m_socket.receive(m_context.readBuffer.peekDst());
-			m_context.readBuffer.putN(nbytes);
-			return WaitForDataAsyncStatus.dataAvailable;
+		version(Posix) {
+			pollfd fd;
+			fd.fd = m_socket.handle;
+			fd.events = POLLIN;
+			auto res = poll(&fd, 1, 0); // quick check
+			if (res > 0) {
+				auto nbytes = m_socket.receive(m_context.readBuffer.peekDst());
+				m_context.readBuffer.putN(nbytes);
+				return WaitForDataAsyncStatus.dataAvailable;
+			}
+			else {
+				runTask((CALLABLE callback){
+					try {
+						pollfd fd;
+						fd.fd = m_socket.handle;
+						fd.events = POLLIN;
+						auto res = poll(&fd, 1, cast(int)timeout.total!"msecs");
+						if (res == 0)  {
+							callback(false);
+						}
+						else {
+							auto nbytes = m_socket.receive(m_context.readBuffer.peekDst());
+							m_context.readBuffer.putN(nbytes);
+							callback(true);
+						}
+					} catch (Exception e) { assert(false, e.msg); }
+				}, read_ready_callback);
+			}
+			return WaitForDataAsyncStatus.waiting;
+		} else version(Windows) {
+			auto dest = m_context.readBuffer.peekDst();
+			auto nbytes = recvWithTimeout(m_socket.handle, dest.ptr, cast(int)dest.length, 0, 0.seconds);
+			if (nbytes >= 0) {
+				m_context.readBuffer.putN(nbytes);
+				return WaitForDataAsyncStatus.dataAvailable;
+			} 
+			else {
+				runTask((CALLABLE callback){
+					try {
+						pollfd fd;
+						fd.fd = m_socket.handle;
+						fd.events = POLLIN;
+						auto res = recvWithTimeout(m_socket.handle, dest.ptr, cast(int)dest.length, 0, timeout);
+						if (res < 0)  {
+							callback(false);
+						}
+						else {
+							m_context.readBuffer.putN(res);
+							callback(true);
+						}
+					} catch (Exception e) { assert(false, e.msg); }
+				}, read_ready_callback);
+			}
+			return WaitForDataAsyncStatus.waiting;
 		}
-		else {
-			runTask((CALLABLE callback){
-				try {
-					pollfd fd;
-					fd.fd = m_socket.handle;
-					fd.events = POLLIN;
-					auto res = poll(&fd, 1, cast(int)timeout.total!"msecs");
-					if (res == 0)  {
-						callback(false);
-					}
-					else {
-						auto nbytes = m_socket.receive(m_context.readBuffer.peekDst());
-						m_context.readBuffer.putN(nbytes);
-						callback(true);
-					}
-				} catch (Exception e) { assert(false, e.msg); }
-			}, read_ready_callback);
-		}
-		return WaitForDataAsyncStatus.waiting;
 	}
 
 	const(ubyte)[] peek() { return m_context ? m_context.readBuffer.peek() : null; }

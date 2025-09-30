@@ -77,39 +77,43 @@ ScopedMutexLock!(shared(M)) scopedMutexLock(M)(shared(M) mutex, LockMode mode = 
 {
 	return ScopedMutexLock!(shared(M))(mutex, mode);
 }
-/+
+
 ///
 unittest {
-	import vibe.core.core : runWorkerTaskH;
+	runPhoton({
+		import vibe.core.core : runWorkerTaskH;
 
-	__gshared int counter;
-	__gshared TaskMutex mutex;
+		__gshared int counter;
+		__gshared TaskMutex mutex;
 
-	mutex = new TaskMutex;
+		mutex = new TaskMutex;
 
-	Task[] tasks;
+		Task[] tasks;
 
-	foreach (i; 0 .. 100) {
-		tasks ~= runWorkerTaskH(() nothrow {
-			auto l = scopedMutexLock(mutex);
-			counter++;
-		});
-	}
+		foreach (i; 0 .. 100) {
+			tasks ~= runWorkerTaskH(() nothrow {
+				auto l = scopedMutexLock(mutex);
+				counter++;
+			});
+		}
 
-	foreach (t; tasks) t.join();
+		foreach (t; tasks) t.join();
 
-	assert(counter == 100);
+		assert(counter == 100);
+	});
 }
 
 unittest {
-	scopedMutexLock(new Mutex);
-	scopedMutexLock(new TaskMutex);
-	scopedMutexLock(new InterruptibleTaskMutex);
-	scopedMutexLock(new shared Mutex);
-	scopedMutexLock(new shared TaskMutex);
-	scopedMutexLock(new shared InterruptibleTaskMutex);
+	runPhoton({
+		//scopedMutexLock(new Mutex);
+		scopedMutexLock(new TaskMutex);
+		//scopedMutexLock(new InterruptibleTaskMutex);
+		//scopedMutexLock(new shared Mutex);
+		scopedMutexLock(new shared TaskMutex);
+		//scopedMutexLock(new shared InterruptibleTaskMutex);
+	});
 }
-+/
+
 
 enum LockMode {
 	lock,
