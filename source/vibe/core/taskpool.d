@@ -51,7 +51,7 @@ shared final class TaskPool {
 		if (isFunctionPointer!FT)
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
-		vibe.core.core.runTask(func, args);
+		runTask_Internal!go(func, args);
 	}
 	/// ditto
 	void runTask(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
@@ -59,14 +59,14 @@ shared final class TaskPool {
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 		auto func = &__traits(getMember, object, __traits(identifier, method));
-		vibe.core.core.runTask(func, args);
+		runTask_Internal!go(func, args);
 	}
 	/// ditto
 	void runTask(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
 		if (isFunctionPointer!FT)
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
-		vibe.core.core.runTask(func, args);
+		runTask_Internal!go(func, args);
 	}
 	/// ditto
 	void runTask(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
@@ -74,7 +74,7 @@ shared final class TaskPool {
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 		auto func = &__traits(getMember, object, __traits(identifier, method));
-		vibe.core.core.runTask(func, args);
+		runTask_Internal!go(func, args);
 	}
 
 	/** Runs a new asynchronous task in a worker thread, returning the task handle.
@@ -214,7 +214,7 @@ shared final class TaskPool {
 
 	private void runTaskDist_unsafe(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args) {
 		foreach (_; 0..this.threadCount) {
-			runTask(func, args);
+			runTask_Internal!go(func, args);
 		}
 	}
 
