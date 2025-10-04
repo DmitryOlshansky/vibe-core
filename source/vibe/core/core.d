@@ -298,7 +298,7 @@ Task runTask(CALLABLE, ARGS...)(TaskSettings settings, CALLABLE task, auto ref A
 
 package Task runTask_Internal(alias method, CALLABLE, ARGS...)(CALLABLE task, auto ref ARGS args) @trusted {
 	import std.traits;
-	import core.stdc.stdlib, core.stdc.string;
+	import core.stdc.stdlib, core.stdc.string, core.memory;
 	alias Params = ParameterTypeTuple!CALLABLE;
 	struct Tup(T...) {
 		T args;
@@ -407,7 +407,7 @@ unittest {
 		~this() @safe nothrow { if (rc) atomicOp!"-="(*rc, 1); }
 	}
 
-	runTask({
+	runTask(() nothrow {
 		S s;
 		s.rc = new int;
 		*s.rc = 1;

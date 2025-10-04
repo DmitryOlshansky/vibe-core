@@ -995,7 +995,7 @@ private FileInfo makeFileInfo(DirEntry ent)
 	return ret;
 }
 
-version (Windows) {} else unittest {
+unittest {
 	runPhoton({
 		void test(string name_in, string name_out, bool hidden) {
 			auto de = DirEntry(name_in);

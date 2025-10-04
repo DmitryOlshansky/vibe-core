@@ -1449,7 +1449,7 @@ package final class VibedScheduler : Scheduler {
 				break;
 		}
 	}
-	override void yield() { delay(1.usecs); }
+	override void yield() { photon.yield(); }
 	override @property ref ThreadInfo thisInfo() @trusted { return Task.getThis().tidInfo; }
 	override TaskCondition newCondition(Mutex m)
 	{
