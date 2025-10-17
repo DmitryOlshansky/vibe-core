@@ -9,6 +9,7 @@ module vibe.core.taskpool;
 
 import std.traits;
 import std.typecons;
+import core.atomic;
 import vibe.core.concurrency;
 import vibe.internal.traits;
 import vibe.core.task;
@@ -213,9 +214,7 @@ shared final class TaskPool {
 	}
 
 	private void runTaskDist_unsafe(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args) {
-		foreach (_; 0..this.threadCount) {
-			runTask_Internal!go(func, args);
-		}
+		runTasks!goOnAllThreads(func, args);
 	}
 
 	/** Runs a new asynchronous task in all worker threads and returns the handles.
@@ -252,6 +251,61 @@ shared final class TaskPool {
 		}
 
 		ch.close();
+	}
+}
+
+package void runTasks(alias method, CALLABLE, ARGS...)(CALLABLE task, auto ref ARGS args) @trusted {
+	import std.traits;
+	import core.stdc.stdlib, core.stdc.string, core.memory;
+	alias Params = ParameterTypeTuple!CALLABLE;
+	struct Tup(T...) {
+		T args;
+		shared uint refCount;
+	}
+	static if (Params.length == 0) {
+		return method(() => task());
+	}
+	else {
+		Tup!Params* tup = cast(Tup!Params*)malloc(Tup!Params.sizeof);
+		Tup!Params init;
+		memcpy(tup, &init, init.sizeof);
+		GC.addRange(tup, init.sizeof);
+		tup.refCount = cast(uint)schedulerThreads;
+		foreach (i, ref el; args) {
+			static if (needsMove!(typeof(el)))
+				tup.args[i] = move(el);
+			else
+				*cast(Unqual!(typeof(el))*)&tup.args[i] = *cast(Unqual!(typeof(el))*)&el;
+		}
+		string code() {
+			string buf = "task(";
+			static foreach (i; 0..ARGS.length) {
+				if (i != 0)
+					buf ~= ",";
+				static if (!isCopyable!(ARGS[i])) {
+					buf ~= format("move(tup.args[%d])", i);
+				} else {
+					buf ~= format("tup.args[%d]", i);
+				}
+			}
+			buf ~= ");";
+			return buf;
+		}
+		return method(() {
+			try {
+				mixin(code());
+			} finally {
+				if (atomicFetchSub(tup.refCount, 1) == 1) {
+					foreach (ref el; tup.args) {
+						static if (hasElaborateDestructor!(typeof(el))) {
+							destroy(el);
+						}
+					}
+					GC.removeRange(tup);
+					free(tup);
+				}
+			}
+		});
 	}
 }
 
